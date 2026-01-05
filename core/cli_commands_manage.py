@@ -776,7 +776,7 @@ class ManageCommandsMixin:
                 continue
 
             if key == "status":
-                st = parse_status(value)
+                st = 1 if str(value).strip() in {"1", "完结", "完本"} else 0
                 if st in {0, 1}:
                     value = st
                 else:
