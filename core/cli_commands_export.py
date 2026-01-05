@@ -4,28 +4,26 @@ import shutil
 import zipfile
 from datetime import datetime
 
-from .utils import Colors
+from .utils import Colors, parse_id_ranges, parse_query_args
 
 
 class ExportCommandsMixin:
     def do_export(self, arg):
         """导出书籍: export <选择器> [目标目录] [--zip]
-        
+
         选择器支持:
-        1. ID: export 1
-        2. 多个ID: export 1,2,3
-        3. 所有: export all
-        4. 过滤器: export author:佚名
-                  export series:魔法系列
-                  export tag:变身
-        
+        1) ID 范围: export 1-5
+        2) 过滤器 : export author:佚名
+        3) 关键词 : export all (导出所有)
+
         选项:
-        --zip: 打包成zip文件导出 (默认导出为文件夹)
-        
+        - --zip: 打包成 zip 文件导出
+
         示例:
-        export 5 ~/Desktop
-        export all ~/Desktop/MyLibrary
-        export author:佚名 ~/Desktop --zip
+        1) export 1-10 ~/Desktop
+        2) export ids:1,3,5 ~/Desktop
+        3) export all ~/Desktop/MyLibrary
+        4) export author:佚名 ~/Desktop --zip
         """
         args = shlex.split(arg)
         if not args:
@@ -47,34 +45,14 @@ class ExportCommandsMixin:
         books_to_export = []
 
         if selector.lower() == "all":
-            books_to_export = self.db.list_books()
-        elif "," in selector or selector.isdigit():
-            ids = [int(x) for x in selector.split(",") if x.isdigit()]
-            for bid in ids:
-                book = self.db.get_book(bid)
-                if book:
-                    books_to_export.append(book)
-                else:
-                    print(Colors.yellow(f"找不到 ID 为 {bid} 的书，跳过喵..."))
-        elif ":" in selector or "=" in selector:
-            key, val = selector.split(":", 1) if ":" in selector else selector.split("=", 1)
-            filters = {}
-            if key in ["author", "series", "tag", "tags", "status"]:
-                if key == "tag":
-                    key = "tags"
-                if key == "status":
-                    try:
-                        val = int(val)
-                    except Exception:
-                        pass
-                filters[key] = val
-                books_to_export = self.db.advanced_search(filters=filters)
-            else:
-                print(Colors.red(f"不支持的过滤器: {key}，请使用 author, series, tag, status 喵~"))
-                return
+            books_to_export = list(self.db.list_books())
         else:
-            print(Colors.red("无法识别的选择器喵！请使用 ID, all, 或 author:名字"))
-            return
+            q, f = parse_query_args([selector], strict_id_mode=True)
+            if q or f:
+                books_to_export = list(self.db.advanced_search(q, f))
+            else:
+                print(Colors.red("无法识别的选择器喵！请使用 ID, all, 或 author:名字"))
+                return
 
         if not books_to_export:
             print(Colors.yellow("没有找到要导出的书喵..."))

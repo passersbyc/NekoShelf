@@ -2,7 +2,7 @@ import shlex
 import shutil
 import unicodedata
 
-from .utils import Colors
+from .utils import Colors, parse_id_ranges, parse_query_args
 
 
 class QueryCommandsMixin:
@@ -60,7 +60,13 @@ class QueryCommandsMixin:
         return " ".join(f"#{p}" for p in parts)
 
     def do_list(self, arg):
-        """列出藏书: list [关键词] [field:value] ... [--limit N] [--sort 字段] [--asc/--desc] [--path] [--compact]
+        """列出藏书: list [关键词] [field:value] ... [--limit N] [--sort 字段] [--asc/--desc]
+
+        选择器支持:
+        1) ID 范围: list 1-10
+        2) 过滤器: list author:佚名 status:1
+                 list series:魔法系列
+        3) 关键词: list 魔法
 
         选项:
         - --limit N: 限制显示数量
@@ -69,11 +75,9 @@ class QueryCommandsMixin:
         - --path: 额外显示文件路径
         - --compact: 紧凑显示(隐藏标签列)
 
-        标签显示:
-        - 输出样式为 #标签，多个标签用空格分开
-
         示例:
         list
+        list 1-10
         list 变身 --limit 20
         list author:佚名 status:1 --sort title
         list series:碧蓝航线ts --path
@@ -90,14 +94,13 @@ class QueryCommandsMixin:
 
         raw = (arg or "").strip()
         args = shlex.split(raw) if raw else []
-        query_parts = []
-        filters = {}
         limit = None
         sort_field = None
         order = None
         show_path = False
         compact = False
 
+        rest_args = []
         i = 0
         while i < len(args):
             token = args[i]
@@ -146,34 +149,10 @@ class QueryCommandsMixin:
                 i += 1
                 continue
 
-            key = None
-            v = None
-            if ":" in token:
-                key, v = token.split(":", 1)
-            elif "=" in token:
-                key, v = token.split("=", 1)
-
-            if key:
-                key = key.lower()
-                if key in ["author", "series", "title"]:
-                    filters[key] = v
-                elif key in ["tag", "tags"]:
-                    filters["tags"] = v
-                elif key in ["status"]:
-                    try:
-                        filters["status"] = int(v)
-                    except Exception:
-                        print(Colors.yellow(f"状态要是数字喵 (0或1)，已忽略: {token}"))
-                elif key in ["type", "format", "ext"]:
-                    filters["file_type"] = str(v).lstrip(".")
-                else:
-                    query_parts.append(token)
-            else:
-                query_parts.append(token)
-
+            rest_args.append(token)
             i += 1
 
-        query = " ".join(query_parts).strip() if query_parts else None
+        query, filters = parse_query_args(rest_args, strict_id_mode=False)
 
         if query or filters:
             books = self.db.advanced_search(query, filters)
@@ -311,71 +290,38 @@ class QueryCommandsMixin:
 
     def do_search(self, arg):
         """搜索书籍: search [关键词] [field:value] ...
-        
-        支持的过滤器:
-        author:作者名   - 搜索特定作者
-        series:系列名   - 搜索特定系列
-        tag:标签       - 搜索特定标签
-        status:1/0     - 1=完结, 0=连载
-        type:格式      - 如 txt, pdf
 
-        示例: 
+        选择器支持:
+        1) ID 范围: search 1-10
+        2) 过滤器: search author:佚名 status:1
+                 search series:魔法系列 tag:变身
+        3) 关键词: search 魔法 (模糊搜索)
+
+        选项:
+        - --ids: 仅输出匹配的 ID 列表 (方便复制)
+
+        支持的过滤器:
+        - ids:1,3-5      - 搜索特定ID范围
+        - author:作者名   - 搜索特定作者
+        - series:系列名   - 搜索特定系列
+        - tag:标签       - 搜索特定标签
+        - status:1/0     - 1=完结, 0=连载
+        - type:格式      - 如 txt, pdf
+
+        示例:
+        search 10-20
+        search ids:1,3,5 tag:魔法
         search 魔法 author:佚名
         search status:1 tag:变身
-
-        标签显示:
-        - 输出样式为 #标签，多个标签用空格分开
-        
-        * 关键词支持模糊搜索喵！(输入 "魔圆" 可以搜到 "魔法少女小圆")
+        search 魔法 --ids
         """
         if not arg:
             print(Colors.red("请输入搜索内容喵！"))
             return
 
-        def parse_status(v):
-            s = "" if v is None else str(v).strip().lower()
-            if s in {"1", "完结", "已完结", "end", "done", "completed"}:
-                return 1
-            if s in {"0", "连载", "连载中", "未完结", "ongoing"}:
-                return 0
-            try:
-                return int(s)
-            except Exception:
-                return None
-
         args = shlex.split(arg)
-        query_parts = []
-        filters = {}
-
-        for item in args:
-            key = None
-            val = None
-
-            if ':' in item:
-                key, val = item.split(':', 1)
-            elif '=' in item:
-                key, val = item.split('=', 1)
-
-            if key:
-                key = key.lower()
-                if key in ['author', 'series', 'title']:
-                    filters[key] = val
-                elif key in ['tag', 'tags']:
-                    filters['tags'] = val
-                elif key in ['status']:
-                    st = parse_status(val)
-                    if st in {0, 1}:
-                        filters['status'] = st
-                    else:
-                        print(Colors.yellow(f"状态要是 0/1 或 连载/完结 喵，已忽略: {item}"))
-                elif key in ['type', 'format', 'ext']:
-                    filters['file_type'] = val.lstrip('.')
-                else:
-                    query_parts.append(item)
-            else:
-                query_parts.append(item)
-
-        query = " ".join(query_parts) if query_parts else None
+        query, filters = parse_query_args(args, strict_id_mode=False)
+        
         books = self.db.advanced_search(query, filters)
 
         if not books:

@@ -2,7 +2,7 @@ import shlex
 from collections import Counter
 from pathlib import Path
 
-from .utils import Colors
+from .utils import Colors, parse_id_ranges, parse_query_args, parse_tags_to_list
 from .config import UPDATE_CONFIG
 
 
@@ -53,25 +53,7 @@ class ManageCommandsMixin:
         return []
 
     def _parse_tags(self, raw):
-        s = "" if raw is None else str(raw)
-        s = s.replace("，", ",").replace("+", ",").replace("#", " ")
-        parts = []
-        for chunk in s.split(","):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            parts.extend([p.strip() for p in chunk.split() if p.strip()])
-        out = []
-        seen = set()
-        for p in parts:
-            p2 = p.strip().lstrip("#").strip()
-            if not p2:
-                continue
-            if p2 in seen:
-                continue
-            seen.add(p2)
-            out.append(p2)
-        return out
+        return parse_tags_to_list(raw)
 
     def _join_tags(self, tags_list):
         tags_list = tags_list or []
@@ -345,7 +327,7 @@ class ManageCommandsMixin:
         - --keep-file: 只删除数据库记录，不删除磁盘文件
 
         注意:
-        - 默认会删除磁盘文件 + 数据库记录，且需要输入 yes 二次确认
+        - 默认会删除磁盘文件 + 数据库记录，且需要输入 yes 二次确认喵！
         """
 
         args = shlex.split((arg or "").strip())
@@ -383,76 +365,6 @@ class ManageCommandsMixin:
             print(Colors.red('参数不够喵！示例: delete 12'))
             return
 
-        def parse_status(s):
-            s = "" if s is None else str(s).strip().lower()
-            if s in {"1", "完结", "已完结", "end", "done", "completed"}:
-                return 1
-            if s in {"0", "连载", "连载中", "未完结", "ongoing"}:
-                return 0
-            try:
-                return int(s)
-            except Exception:
-                return None
-
-        def parse_filters(tokens):
-            query_parts = []
-            filters = {}
-            for item in tokens:
-                key = None
-                val = None
-                if ":" in item:
-                    key, val = item.split(":", 1)
-                elif "=" in item:
-                    key, val = item.split("=", 1)
-
-                if key:
-                    k = str(key).strip().lower()
-                    v = "" if val is None else str(val)
-                    if k in {"author", "series", "title"}:
-                        filters[k] = v
-                    elif k in {"tag", "tags"}:
-                        filters["tags"] = v
-                    elif k == "status":
-                        st = parse_status(v)
-                        if st in {0, 1}:
-                            filters["status"] = st
-                        else:
-                            print(Colors.yellow(f"状态要是 0/1 或 连载/完结 喵，已忽略: {item}"))
-                    elif k in {"type", "format", "ext"}:
-                        filters["file_type"] = v.lstrip(".")
-                    else:
-                        query_parts.append(item)
-                else:
-                    query_parts.append(item)
-
-            query = " ".join(query_parts).strip() if query_parts else None
-            return query, filters
-
-        def parse_ids(token):
-            ids = []
-            parts = [p.strip() for p in str(token).split(",") if p.strip()]
-            for p in parts:
-                if "-" in p:
-                    left, right = p.split("-", 1)
-                    if left.strip().isdigit() and right.strip().isdigit():
-                        a = int(left.strip())
-                        b = int(right.strip())
-                        if a <= b:
-                            ids.extend(range(a, b + 1))
-                        else:
-                            ids.extend(range(b, a + 1))
-                        continue
-                if p.isdigit():
-                    ids.append(int(p))
-            out = []
-            seen = set()
-            for x in ids:
-                if x in seen:
-                    continue
-                seen.add(x)
-                out.append(x)
-            return out
-
         selector = rest[0]
         sel_lower = str(selector).strip().lower()
 
@@ -462,23 +374,14 @@ class ManageCommandsMixin:
                 if len(rest) == 1:
                     books = list(self.db.list_books())
                 else:
-                    q, f = parse_filters(rest[1:])
+                    q, f = parse_query_args(rest[1:], strict_id_mode=True)
                     books = list(self.db.advanced_search(q, f))
             else:
-                ids = parse_ids(selector)
-                if ids:
-                    for bid in ids:
-                        b = self.db.get_book(bid)
-                        if b:
-                            books.append(b)
-                        else:
-                            print(Colors.yellow(f"找不到 ID 为 {bid} 的书喵，已跳过~"))
-                else:
-                    q, f = parse_filters(rest)
-                    if not q and not f:
-                        print(Colors.red('没有找到可用的选择器喵！示例: delete 12 或 delete author:佚名'))
-                        return
-                    books = list(self.db.advanced_search(q, f))
+                q, f = parse_query_args(rest, strict_id_mode=True)
+                if not q and not f:
+                    print(Colors.red('没有找到可用的选择器喵！示例: delete 12 或 delete author:佚名'))
+                    return
+                books = list(self.db.advanced_search(q, f))
         except Exception as e:
             print(Colors.red(f"出错了喵... {e}"))
             return
@@ -578,9 +481,9 @@ class ManageCommandsMixin:
 
         选项:
         - --dry-run: 仅预览不修改
-        - --diff: 预览时输出字段变更详情(默认由 UPDATE_CONFIG 控制)
-        - --show=N: 预览时展示前 N 条(默认由 UPDATE_CONFIG 控制)
-        - --limit=N: 批量更新只处理前 N 本(按 ID 排序，默认由 UPDATE_CONFIG 控制)
+        - --diff: 预览时输出字段变更详情
+        - --show=N: 预览时展示前 N 条
+        - --limit=N: 批量更新只处理前 N 本(按 ID 排序)
         - --sync: 从当前文件路径同步 title/author/series 并写回数据库
         - --no-move: 修改 title/author/series 时不搬家(只改数据库)
 
@@ -589,15 +492,13 @@ class ManageCommandsMixin:
         - tags+=...  : 增加标签
         - tags-=...  : 删除标签
 
-        文本操作(可在 UPDATE_CONFIG 关闭):
+        文本操作:
         - title+=... / title-=...   : 追加/删除子串
         - author+=... / author-=...
         - series+=... / series-=...
 
-        分隔符:
-        - 选择器与更新项容易混淆时，用 "--" 显式分隔:
-          update <选择器> -- <更新项...>
-          update ids <选择器> -- <更新项...>
+        便捷:
+        - 输出匹配 ID 列表: update ids <选择器>
 
         示例:
         1) update 1 title="新标题" author="新作者"
@@ -605,17 +506,6 @@ class ManageCommandsMixin:
         3) update 1 tags+="#换身" tags-="#精神" --dry-run
         4) update 1 --sync
         5) update series:碧蓝航线ts title="堕04" --dry-run
-
-        注意:
-        - 修改 title/author/series 会自动移动文件到新位置喵！
-        - 支持按 Tab 自动补全: ID、字段名，以及常见 author/series/tags/status 值喵~
-
-        便捷:
-        - 输出匹配 ID 列表: update ids <选择器>
-          例: update ids author="卡朵琪琪斯"
-
-        精简:
-        - 更多默认行为可在 core/config.py 的 UPDATE_CONFIG 里调整喵~
         """
         args = shlex.split((arg or "").strip())
         if not args:
@@ -630,76 +520,6 @@ class ManageCommandsMixin:
                 return r[key]
             except Exception:
                 return default
-
-        def parse_status(s):
-            s = "" if s is None else str(s).strip().lower()
-            if s in {"1", "完结", "已完结", "end", "done", "completed"}:
-                return 1
-            if s in {"0", "连载", "连载中", "未完结", "ongoing"}:
-                return 0
-            try:
-                return int(s)
-            except Exception:
-                return None
-
-        def parse_filters(tokens):
-            query_parts = []
-            filters = {}
-            for item in tokens:
-                key = None
-                val = None
-                if ":" in item:
-                    key, val = item.split(":", 1)
-                elif "=" in item and ("+=" not in item) and ("-=" not in item):
-                    key, val = item.split("=", 1)
-
-                if key:
-                    k = str(key).strip().lower()
-                    v = "" if val is None else str(val)
-                    if k in {"author", "series", "title"}:
-                        filters[k] = v
-                    elif k in {"tag", "tags"}:
-                        filters["tags"] = v
-                    elif k == "status":
-                        st = parse_status(v)
-                        if st in {0, 1}:
-                            filters["status"] = st
-                        else:
-                            query_parts.append(item)
-                    elif k in {"type", "format", "ext"}:
-                        filters["file_type"] = v.lstrip(".")
-                    else:
-                        query_parts.append(item)
-                else:
-                    query_parts.append(item)
-
-            query = " ".join(query_parts).strip() if query_parts else None
-            return query, filters
-
-        def parse_ids(token):
-            ids = []
-            parts = [p.strip() for p in str(token).split(",") if p.strip()]
-            for p in parts:
-                if "-" in p:
-                    left, right = p.split("-", 1)
-                    if left.strip().isdigit() and right.strip().isdigit():
-                        a = int(left.strip())
-                        b = int(right.strip())
-                        if a <= b:
-                            ids.extend(range(a, b + 1))
-                        else:
-                            ids.extend(range(b, a + 1))
-                        continue
-                if p.isdigit():
-                    ids.append(int(p))
-            out = []
-            seen = set()
-            for x in ids:
-                if x in seen:
-                    continue
-                seen.add(x)
-                out.append(x)
-            return out
 
         if str(args[0]).strip().lower() in {"ids", "id"}:
             sel = args[1:]
@@ -766,22 +586,14 @@ class ManageCommandsMixin:
                     if len(selector) == 1:
                         books = list(self.db.list_books())
                     else:
-                        q, f = parse_filters(selector[1:])
+                        q, f = parse_query_args(selector[1:], strict_id_mode=True)
                         books = list(self.db.advanced_search(q, f))
                 else:
-                    ids = parse_ids(selector[0]) if len(selector) == 1 else []
-                    if ids:
-                        books = []
-                        for bid in ids:
-                            b = self.db.get_book(bid)
-                            if b:
-                                books.append(b)
-                    else:
-                        q, f = parse_filters(selector)
-                        if not q and not f:
-                            print(Colors.red('没有找到可用的选择器喵！示例: update ids author:"佚名"'))
-                            return
-                        books = list(self.db.advanced_search(q, f))
+                    q, f = parse_query_args(selector, strict_id_mode=True)
+                    if not q and not f:
+                        print(Colors.red('没有找到可用的选择器喵！示例: update ids author:"佚名"'))
+                        return
+                    books = list(self.db.advanced_search(q, f))
             except Exception as e:
                 print(Colors.red(f"出错了喵... {e}"))
                 return
@@ -991,23 +803,14 @@ class ManageCommandsMixin:
                 if len(selector_tokens) == 1:
                     books = list(self.db.list_books())
                 else:
-                    q, f = parse_filters(selector_tokens[1:])
+                    q, f = parse_query_args(selector_tokens[1:], strict_id_mode=True)
                     books = list(self.db.advanced_search(q, f))
             else:
-                ids = parse_ids(selector_tokens[0]) if len(selector_tokens) == 1 else []
-                if ids:
-                    for bid in ids:
-                        b = self.db.get_book(bid)
-                        if b:
-                            books.append(b)
-                        else:
-                            print(Colors.yellow(f"找不到 ID 为 {bid} 的书喵，已跳过~"))
-                else:
-                    q, f = parse_filters(selector_tokens)
-                    if not q and not f:
-                        print(Colors.red('没有找到可用的选择器喵！示例: update 12 title=... 或 update author:佚名 status:1'))
-                        return
-                    books = list(self.db.advanced_search(q, f))
+                q, f = parse_query_args(selector_tokens, strict_id_mode=True)
+                if not q and not f:
+                    print(Colors.red('没有找到可用的选择器喵！示例: update 12 title=... 或 update author:佚名 status:1'))
+                    return
+                books = list(self.db.advanced_search(q, f))
         except Exception as e:
             print(Colors.red(f"出错了喵... {e}"))
             return

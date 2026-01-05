@@ -8,16 +8,20 @@ from .utils import Colors
 
 class DownloadCommandsMixin:
     def do_download(self, arg):
-        """从网络下载书籍: download <URL> [重命名文件名/参数...]
-        
+        """从网络下载书籍: download <URL> [文件名] [选项]
+
+        说明:
+        - 下载完成后会自动调用 import 进行导入
+        - 支持所有 import 命令的选项 (如 --dry-run)
+
         示例:
-        1. 自动重命名并导入 (推荐):
+        1) 自动重命名并导入:
            download http://site.com/1.txt 魔法书_作者_标签.txt
-           
-        2. 下载后手动指定信息:
-           download http://site.com/1.txt 魔法书 作者
-           
-        3. 仅下载 (尝试从URL获取文件名):
+
+        2) 下载后手动指定信息:
+           download http://site.com/1.txt 魔法书 "作者" "标签"
+
+        3) 简单下载 (尝试从URL获取文件名):
            download http://site.com/file.pdf
         """
         args = shlex.split(arg)

@@ -147,7 +147,6 @@ class DatabaseManager:
         
         # 通用关键词搜索 (标题/作者/标签) - 支持模糊搜索
         if query:
-            sql += " AND (title LIKE ? OR author LIKE ? OR tags LIKE ?)"
             
             # 模糊匹配逻辑: "魔圆" -> "%魔%圆%"
             # 移除空格以支持跨空格匹配 (如输入 "魔圆" 匹配 "魔 法 圆")
@@ -156,8 +155,20 @@ class DatabaseManager:
                 fuzzy_pattern = "%" + "%".join(list(clean_query)) + "%"
             else:
                 fuzzy_pattern = f"%{query}%"
-                
-            params.extend([fuzzy_pattern, fuzzy_pattern, fuzzy_pattern])
+            
+            # 尝试检测是否为 ID
+            qid = None
+            try:
+                qid = int(query.strip())
+            except Exception:
+                pass
+
+            if qid is not None:
+                sql += " AND (title LIKE ? OR author LIKE ? OR tags LIKE ? OR id = ?)"
+                params.extend([fuzzy_pattern, fuzzy_pattern, fuzzy_pattern, qid])
+            else:
+                sql += " AND (title LIKE ? OR author LIKE ? OR tags LIKE ?)"
+                params.extend([fuzzy_pattern, fuzzy_pattern, fuzzy_pattern])
             
         # 精确/特定字段过滤
         if filters:
@@ -168,6 +179,12 @@ class DatabaseManager:
                 elif key == 'file_type':
                     sql += " AND file_type LIKE ?" # 后缀不区分大小写
                     params.append(value)
+                elif key == 'ids':
+                    # value should be a list of integers
+                    if value:
+                        placeholders = ",".join("?" for _ in value)
+                        sql += f" AND id IN ({placeholders})"
+                        params.extend(value)
                 elif key in ['author', 'series', 'tags', 'title']:
                     pats = _like_patterns(value)
                     if not pats:

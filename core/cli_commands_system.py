@@ -256,29 +256,29 @@ class SystemCommandsMixin:
         print(self.intro)
 
     def do_clean(self, arg="", silent=False):
-        """清理无效记录: clean [--sync] [--dry-run] [--yes] [--delete-illegal/--keep-illegal]
+        """清理无效记录: clean [--sync] [--dry-run] [--yes]
 
-        默认只做数据库清理:
+        默认行为(不带参数):
         1) 移除文件不存在的记录
         2) 移除标题以 . 开头的非法书籍记录
         3) 合并指向同一文件的重复记录（保留 ID 最大的）
 
-        可选同步藏书目录(根据实际文件夹补录数据库):
-        - --sync/--scan: 扫描 library/ 下的文件，数据库缺失则补录
-        - 同步时会补齐缺失的 file_hash，并在文件搬家/改名后尝试用 file_hash 纠正 file_path
-        - 非法文件(不支持后缀或以 . 开头)默认会自动删除(可用 --keep-illegal 保留)
+        同步模式(clean --sync):
+        - 扫描 library/ 下的文件，补录数据库缺失的记录
+        - 补齐 file_hash，并尝试用 hash 找回搬家/改名的文件
+        - 非法文件(不支持后缀或以 . 开头)会自动删除(可用 --keep-illegal 保留)
 
         选项:
-        - --dry-run: 仅预览，不做任何写入/删除
-        - --yes: 在 --sync 时跳过确认，直接执行同步
-        - --delete-illegal: 非法文件全部删除(默认已是自动删除)
-        - --keep-illegal: 非法文件全部保留
+        - --sync / --scan : 同步藏书目录到数据库
+        - --dry-run       : 仅预览，不做任何写入/删除
+        - --yes / -y      : 跳过确认，直接执行
+        - --keep-illegal  : 同步时保留非法文件(默认会自动删除)
 
-        常用:
-        1) 只清理数据库(默认): clean
-        2) 同步目录到数据库(单命令预览后确认): clean --sync
-        3) 同步但不询问: clean --sync --yes
-        4) 仅看同步会做什么: clean --sync --dry-run
+        示例:
+        1) clean                  (仅清理数据库无效记录)
+        2) clean --sync           (同步目录 + 清理数据库，需确认)
+        3) clean --sync --yes     (同步 + 清理，不询问)
+        4) clean --sync --dry-run (仅查看同步会做什么)
         """
         tokens = []
         try:
