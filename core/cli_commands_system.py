@@ -300,6 +300,15 @@ class SystemCommandsMixin:
             sync_lib = False
             dry_run = False
 
+        tag_prefixes = ("【小说+漫画】", "【小说】", "【漫画】")
+
+        def strip_tag_prefix(name):
+            s = "" if name is None else str(name)
+            for p in tag_prefixes:
+                if s.startswith(p):
+                    return s[len(p) :].lstrip()
+            return s
+
         books = list(self.db.list_books() or [])
         if (not books) and (not sync_lib):
             if not silent:
@@ -364,6 +373,24 @@ class SystemCommandsMixin:
                 path_map[norm_path] = []
             path_map[norm_path].append(book)
 
+        author_fix_count = 0
+        for book in valid_books:
+            try:
+                old_author = book['author'] or "佚名"
+                new_author = strip_tag_prefix(old_author)
+                if new_author != old_author:
+                    if dry_run:
+                        if not silent:
+                            print(Colors.cyan(f"预览修正作者: [{book['id']}] {old_author} -> {new_author}"))
+                        author_fix_count += 1
+                    else:
+                        self.db.update_book(book['id'], author=new_author)
+                        if not silent:
+                            print(Colors.green(f"已修正作者: [{book['id']}] {old_author} -> {new_author}"))
+                        author_fix_count += 1
+            except Exception:
+                pass
+
         for path, duplicates in path_map.items():
             if len(duplicates) > 1:
                 duplicates.sort(key=lambda x: x['id'], reverse=True)
@@ -391,7 +418,7 @@ class SystemCommandsMixin:
                                 )
                             dedup_count += 1
 
-        if removed_count > 0 or dedup_count > 0 or illegal_title_count > 0:
+        if removed_count > 0 or dedup_count > 0 or illegal_title_count > 0 or author_fix_count > 0:
             msg = []
             if removed_count > 0:
                 msg.append(f"移除了 {removed_count} 条无效记录")
@@ -399,6 +426,8 @@ class SystemCommandsMixin:
                 msg.append(f"清理了 {illegal_title_count} 本非法标题书籍")
             if dedup_count > 0:
                 msg.append(f"合并了 {dedup_count} 条重复记录")
+            if author_fix_count > 0:
+                msg.append(f"修正了 {author_fix_count} 个作者名")
             if not silent:
                 if dry_run:
                     print(Colors.green(f"清理预览: {'，'.join(msg)}喵！"))
@@ -426,15 +455,6 @@ class SystemCommandsMixin:
             if not silent:
                 print(Colors.red(f"找不到藏书目录喵: {lib_root}"))
             return
-
-        tag_prefixes = ("【小说+漫画】", "【小说】", "【漫画】")
-
-        def strip_tag_prefix(name):
-            s = "" if name is None else str(name)
-            for p in tag_prefixes:
-                if s.startswith(p):
-                    return s[len(p) :].lstrip()
-            return s
 
         def infer_meta_from_path(fp):
             author = "佚名"
