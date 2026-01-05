@@ -152,6 +152,7 @@ class SystemCommandsMixin:
         print(f"\n{section('🔧 系统维护')}")
         print(f"  {cmd('stats')}    {Colors.yellow('查看统计信息')}")
         print(f"  {cmd('clean')}    {Colors.yellow('清理并可同步藏书目录')}  {dim('(补录/纠正路径/删非法)')}")
+        print(f"  {cmd('optimize')} {Colors.yellow('优化数据库')}  {dim('(重排ID/填补空缺/压缩体积)')}")
         print(f"  {cmd('clear')}    {Colors.yellow('清空屏幕')}  {dim('(焕然一新喵)')}")
         print(f"  {cmd('help')}     {Colors.yellow('显示这个帮助菜单')}")
         print(f"  {cmd('exit')}     {Colors.yellow('退出系统')}")
@@ -298,7 +299,8 @@ class SystemCommandsMixin:
 
         if silent:
             sync_lib = False
-            dry_run = False
+
+
 
         tag_prefixes = ("【小说+漫画】", "【小说】", "【漫画】")
 
@@ -926,6 +928,93 @@ class SystemCommandsMixin:
             if renamed:
                 extra2.append(f"标记作者 {renamed} 个")
             print(Colors.green("同步完成喵！" + ("（" + "，".join(extra2) + "）" if extra2 else "")))
+
+    def do_optimize(self, arg):
+        """优化数据库: optimize [--yes]
+
+        功能:
+        1) 重新排列书籍 ID，填补空缺，使其连续 (1, 2, 3...)
+        2) 重置自增序列
+        3) 压缩数据库文件 (VACUUM)
+
+        注意:
+        - 仅当您不依赖特定 ID 引用书籍时使用
+        - 此操作不可逆，建议先备份数据库
+
+        选项:
+        - --yes / -y: 跳过确认
+        """
+        args = shlex.split(arg or "")
+        yes = ("--yes" in args) or ("-y" in args)
+
+        if not yes:
+            print(Colors.red("⚠️  警告: 此操作将重新编号所有书籍 ID！"))
+            print(Colors.yellow("原来的 ID 将会改变，请确保没有外部引用依赖特定 ID。"))
+            confirm = input(Colors.cyan("确认要继续吗喵？(y/N): ")).strip().lower()
+            if confirm != "y":
+                print(Colors.green("操作已取消喵。"))
+                return
+
+        print(Colors.cyan("正在整理书架，请稍候喵..."))
+
+        try:
+            # 1. 获取所有书籍，按 ID 排序以保持相对顺序
+            all_books = sorted(self.db.list_books(), key=lambda x: x['id'])
+            
+            if not all_books:
+                print(Colors.yellow("书架是空的，无需优化喵。"))
+                return
+
+            count = len(all_books)
+            print(Colors.green(f"找到 {count} 本书，准备重排 ID..."))
+
+            # 2. 事务处理
+            cursor = self.db.conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+
+            try:
+                # 备份数据到内存
+                books_data = []
+                for b in all_books:
+                    books_data.append({
+                        'title': b['title'],
+                        'author': b['author'],
+                        'tags': b['tags'],
+                        'status': b['status'],
+                        'series': b['series'],
+                        'file_path': b['file_path'],
+                        'file_hash': b['file_hash'],
+                        'file_type': b['file_type'],
+                        'created_at': b['created_at']
+                    })
+
+                # 清空表
+                cursor.execute("DELETE FROM books")
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name='books'")
+
+                # 重新插入
+                insert_sql = '''
+                    INSERT INTO books (title, author, tags, status, series, file_path, file_hash, file_type, created_at)
+                    VALUES (:title, :author, :tags, :status, :series, :file_path, :file_hash, :file_type, :created_at)
+                '''
+                cursor.executemany(insert_sql, books_data)
+                
+                self.db.conn.commit()
+                print(Colors.green("ID 重排完成喵！"))
+                
+                # 3. VACUUM
+                print(Colors.cyan("正在压缩数据库体积..."))
+                self.db.conn.execute("VACUUM")
+                print(Colors.green("优化全部完成！书架变得整整齐齐啦喵~ ✨"))
+
+            except Exception as e:
+                self.db.conn.rollback()
+                print(Colors.red(f"优化失败，已回滚更改: {e}"))
+                import traceback
+                traceback.print_exc()
+
+        except Exception as e:
+            print(Colors.red(f"发生错误: {e}"))
 
     def preloop(self):
         self.do_clean(silent=True)
