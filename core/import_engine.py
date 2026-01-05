@@ -304,6 +304,14 @@ class ImportEngine:
 
         return {"title": title, "series": series, "author": author, "tags": tags, "status": status}
 
+    def _strip_author_prefix(self, name):
+        tag_prefixes = ("【小说+漫画】", "【小说】", "【漫画】")
+        s = "" if name is None else str(name)
+        for p in tag_prefixes:
+            if s.startswith(p):
+                return s[len(p) :].lstrip()
+        return s
+
     def import_one(self, file_path, overrides=None, dry_run=False, dup_mode="ask", dup_choice=None, hash_cache=None):
         overrides = overrides or {}
         meta = self.parse_metadata_from_filename(file_path) or {}
@@ -368,7 +376,7 @@ class ImportEngine:
                     pparts = rel.split(os.sep)
                     if len(pparts) >= 2:
                         if (not author or author == "佚名") and ("author" not in overrides) and not meta.get("author"):
-                            author = pparts[0]
+                            author = self._strip_author_prefix(pparts[0])
                         if (not series) and ("series" not in overrides) and not meta.get("series") and len(pparts) >= 3:
                             series = pparts[1]
             except Exception:

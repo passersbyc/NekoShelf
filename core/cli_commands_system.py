@@ -427,6 +427,15 @@ class SystemCommandsMixin:
                 print(Colors.red(f"找不到藏书目录喵: {lib_root}"))
             return
 
+        tag_prefixes = ("【小说+漫画】", "【小说】", "【漫画】")
+
+        def strip_tag_prefix(name):
+            s = "" if name is None else str(name)
+            for p in tag_prefixes:
+                if s.startswith(p):
+                    return s[len(p) :].lstrip()
+            return s
+
         def infer_meta_from_path(fp):
             author = "佚名"
             series = ""
@@ -440,7 +449,7 @@ class SystemCommandsMixin:
                 rel = os.path.relpath(fp, lib_root)
                 parts = [p for p in rel.split(os.sep) if p and p not in {".", ".."}]
                 if len(parts) >= 2:
-                    author = parts[0] or author
+                    author = strip_tag_prefix(parts[0]) or author
                 if len(parts) >= 3:
                     series = os.sep.join(parts[1:-1]).strip(os.sep)
             except Exception:
@@ -593,14 +602,6 @@ class SystemCommandsMixin:
                 print(Colors.cyan(f"... 还有 {len(adds) - show_n} 本未展示喵"))
 
         supported_exts2 = set(getattr(self, "_IMPORT_EXTS", {".txt", ".pdf", ".doc", ".docx", ".epub"}))
-        tag_prefixes = ("【小说+漫画】", "【小说】", "【漫画】")
-
-        def strip_tag_prefix(name):
-            s = "" if name is None else str(name)
-            for p in tag_prefixes:
-                if s.startswith(p):
-                    return s[len(p) :].lstrip()
-            return s
 
         def classify_author_dir(dir_path):
             has_doc = False
@@ -643,8 +644,6 @@ class SystemCommandsMixin:
                 if not base:
                     continue
                 tag = classify_author_dir(p)
-                if not tag:
-                    continue
                 new_name = f"{tag}{base}"
                 if new_name == str(name):
                     continue
