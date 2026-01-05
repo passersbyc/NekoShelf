@@ -145,6 +145,7 @@ class SystemCommandsMixin:
         print(f"  {cmd('download')} {Colors.yellow('下载书籍')}  {dim('(从网络链接并自动归档)')}")
         print(f"  {cmd('export')}   {Colors.yellow('导出书籍')}  {dim('(支持批量/筛选/zip)')}")
         print(f"  {cmd('list')}     {Colors.yellow('列出所有藏书')}")
+        print(f"  {cmd('authors')}  {Colors.yellow('列出所有作者')}  {dim('(支持搜索/藏书统计)')}")
         print(f"  {cmd('search')}   {Colors.yellow('搜索书籍')}  {dim('(支持模糊搜索 & 高级过滤)')}")
         print(f"  {cmd('delete')}   {Colors.yellow('删除书籍')}  {dim('(文件和记录)')}")
         print(f"  {cmd('update')}   {Colors.yellow('修改书籍信息')}  {dim('(支持批量/筛选/ids/自动移动)')}")
