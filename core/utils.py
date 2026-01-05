@@ -185,3 +185,53 @@ def parse_query_args(args, strict_id_mode=False):
                 
     query = " ".join(query_parts).strip() if query_parts else None
     return query, filters
+
+
+def simple_complete(text, options):
+    """简单的列表补全"""
+    if not text:
+        return options[:]
+    return [s for s in options if s.startswith(text)]
+
+
+def path_complete(text):
+    """简单的文件路径补全"""
+    import os
+    import glob
+    
+    # 展开用户路径
+    expanded = os.path.expanduser(text)
+    
+    # 如果以目录分隔符结尾，列出该目录下的内容
+    if text.endswith(os.sep):
+        search_dir = expanded
+        prefix = text
+        pattern = ""
+    else:
+        search_dir = os.path.dirname(expanded)
+        prefix = os.path.dirname(text)
+        if prefix:
+            prefix += os.sep
+        pattern = os.path.basename(expanded)
+        
+    if not search_dir:
+        search_dir = "."
+        
+    if not os.path.isdir(search_dir):
+        return []
+        
+    candidates = []
+    try:
+        for name in os.listdir(search_dir):
+            if name.startswith(pattern):
+                # 区分目录和文件
+                full_path = os.path.join(search_dir, name)
+                if os.path.isdir(full_path):
+                    candidates.append(prefix + name + os.sep)
+                else:
+                    candidates.append(prefix + name + " ")
+    except Exception:
+        pass
+        
+    return candidates
+

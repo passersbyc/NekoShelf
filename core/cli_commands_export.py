@@ -4,105 +4,136 @@ import shutil
 import zipfile
 from datetime import datetime
 
-from .utils import Colors, parse_id_ranges, parse_query_args
+from .utils import Colors, parse_id_ranges, parse_query_args, simple_complete
 
 
 class ExportCommandsMixin:
     def do_export(self, arg):
-        """导出书籍: export <选择器> [目标目录] [--zip]
+        """导出书籍或信息: export <ID/选择器> [--format=fmt] [--output=dir]
 
-        选择器支持:
-        1) ID 范围: export 1-5
-        2) 过滤器 : export author:佚名
-        3) 关键词 : export all (导出所有)
+        功能:
+        将书籍信息或文件导出。
 
         选项:
-        - --zip: 打包成 zip 文件导出
+        - --format: 导出格式
+          * zip: 打包源文件 (默认)
+          * json: 导出元数据为 JSON
+          * csv: 导出元数据为 CSV
+          * copy: 复制源文件到指定目录
+        - --output: 输出目录 (默认为 ./exports)
 
         示例:
-        1) export 1-10 ~/Desktop
-        2) export ids:1,3,5 ~/Desktop
-        3) export all ~/Desktop/MyLibrary
-        4) export author:佚名 ~/Desktop --zip
+        export 1,2,3 --format=zip
+        export author:佚名 --format=json
         """
-        args = shlex.split(arg)
-        if not args:
-            print(f"{Colors.RED}请告诉{Colors.HEADER}萌萌{Colors.RED}要导出哪些书喵！{Colors.RESET}")
-            return
-
-        selector = args[0]
-        target_dir = "."
-        use_zip = False
-
-        rest_args = args[1:]
-        if "--zip" in rest_args:
-            use_zip = True
-            rest_args.remove("--zip")
-
-        if rest_args:
-            target_dir = rest_args[0]
-
-        books_to_export = []
-
-        if selector.lower() == "all":
-            books_to_export = list(self.db.list_books())
-        else:
-            q, f = parse_query_args([selector], strict_id_mode=True)
-            if q or f:
-                books_to_export = list(self.db.advanced_search(q, f))
+        args = shlex.split(arg or "")
+        
+        # 提取选项
+        format_type = "zip"
+        output_dir = "./exports"
+        
+        # 提取 --format 和 --output
+        clean_args = []
+        for a in args:
+            if a.startswith("--format="):
+                format_type = a.split("=", 1)[1].lower()
+            elif a.startswith("--output="):
+                output_dir = a.split("=", 1)[1]
             else:
-                print(Colors.red("无法识别的选择器喵！请使用 ID, all, 或 author:名字"))
-                return
-
-        if not books_to_export:
-            print(Colors.yellow("没有找到要导出的书喵..."))
+                clean_args.append(a)
+                
+        if not clean_args:
+            print(Colors.red("请指定要导出的书籍喵~"))
             return
 
-        print(Colors.cyan(f"准备导出 {len(books_to_export)} 本书到 {target_dir} ..."))
-
-        if not os.path.exists(target_dir):
+        query_str, filters = parse_query_args(clean_args, strict_id_mode=True)
+        books = self.db.search_books(filters=filters, query=query_str)
+        
+        if not books:
+            print(Colors.yellow("找不到要导出的书籍喵..."))
+            return
+            
+        count = len(books)
+        print(Colors.cyan(f"准备导出 {count} 本书 (格式: {format_type})..."))
+        
+        if not os.path.exists(output_dir):
             try:
-                os.makedirs(target_dir)
-            except Exception:
-                print(Colors.red(f"无法创建目录: {target_dir}"))
+                os.makedirs(output_dir)
+            except Exception as e:
+                print(Colors.red(f"无法创建输出目录: {e}"))
+                return
+                
+        # 实现导出逻辑 (简化版)
+        success = 0
+        try:
+            if format_type == "json":
+                import json
+                out_file = os.path.join(output_dir, f"export_{int(datetime.now().timestamp())}.json")
+                data = [dict(b) for b in books] # Convert Row to dict
+                with open(out_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                print(Colors.green(f"已导出 JSON 到: {out_file}"))
+                success = count
+                
+            elif format_type == "csv":
+                import csv
+                out_file = os.path.join(output_dir, f"export_{int(datetime.now().timestamp())}.csv")
+                if books:
+                    keys = books[0].keys()
+                    with open(out_file, "w", encoding="utf-8", newline="") as f:
+                        writer = csv.DictWriter(f, fieldnames=keys)
+                        writer.writeheader()
+                        for b in books:
+                            writer.writerow(dict(b))
+                print(Colors.green(f"已导出 CSV 到: {out_file}"))
+                success = count
+                
+            elif format_type in ["zip", "copy"]:
+                for b in books:
+                    fp = b['file_path']
+                    if not fp or not os.path.exists(fp):
+                        print(Colors.yellow(f"文件丢失，跳过: {b['title']}"))
+                        continue
+                        
+                    fname = os.path.basename(fp)
+                    
+                    if format_type == "copy":
+                        dst = os.path.join(output_dir, fname)
+                        try:
+                            shutil.copy2(fp, dst)
+                            success += 1
+                        except Exception as e:
+                            print(Colors.red(f"复制失败 {fname}: {e}"))
+                            
+                    elif format_type == "zip":
+                        # 这里简单处理，实际上可能需要创建一个大的 zip 或每个书一个 zip
+                        # 为简化，创建一个 zip 包含所有
+                        pass 
+
+                if format_type == "zip":
+                    zip_name = os.path.join(output_dir, f"books_export_{int(datetime.now().timestamp())}.zip")
+                    with zipfile.ZipFile(zip_name, 'w') as zf:
+                        for b in books:
+                            fp = b['file_path']
+                            if fp and os.path.exists(fp):
+                                zf.write(fp, os.path.basename(fp))
+                                success += 1
+                    print(Colors.green(f"已打包到: {zip_name}"))
+            
+            else:
+                print(Colors.red(f"不支持的格式: {format_type}"))
                 return
 
-        success_count = 0
+        except Exception as e:
+            print(Colors.red(f"导出过程出错: {e}"))
+            
+        print(Colors.green(f"导出完成喵！成功处理 {success} 本。"))
 
-        if use_zip:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            zip_filename = f"books_export_{timestamp}.zip"
-            zip_path = os.path.join(target_dir, zip_filename)
-
-            try:
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for book in books_to_export:
-                        if os.path.exists(book["file_path"]):
-                            arcname = f"{book['id']}_{os.path.basename(book['file_path'])}"
-                            zf.write(book["file_path"], arcname)
-                            success_count += 1
-                        else:
-                            print(Colors.pink(f"跳过丢失的文件: {book['title']}"))
-                print(Colors.green(f"打包完成喵！已保存为: {zip_path}"))
-            except Exception as e:
-                print(Colors.red(f"打包失败了喵... {e}"))
-        else:
-            for book in books_to_export:
-                if not os.path.exists(book["file_path"]):
-                    print(Colors.pink(f"跳过丢失的文件: {book['title']}"))
-                    continue
-
-                filename = os.path.basename(book["file_path"])
-                dest_path = os.path.join(target_dir, filename)
-
-                if os.path.exists(dest_path):
-                    base, ext = os.path.splitext(filename)
-                    dest_path = os.path.join(target_dir, f"{base}_{book['id']}{ext}")
-
-                try:
-                    shutil.copy2(book["file_path"], dest_path)
-                    success_count += 1
-                except Exception as e:
-                    print(Colors.red(f"复制失败 {filename}: {e}"))
-
-        print(Colors.green(f"任务结束喵！成功导出 {success_count}/{len(books_to_export)} 本。"))
+    def complete_export(self, text, line, begidx, endidx):
+        opts = ["--format=", "--output="]
+        try:
+            books = self.db.list_books() or []
+            ids = [str(b['id']) for b in books]
+            return simple_complete(text, opts + ids)
+        except:
+            return simple_complete(text, opts)

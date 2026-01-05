@@ -2,7 +2,7 @@ import shlex
 from collections import Counter
 from pathlib import Path
 
-from .utils import Colors, parse_id_ranges, parse_query_args, parse_tags_to_list
+from .utils import Colors, parse_id_ranges, parse_query_args, parse_tags_to_list, simple_complete
 from .config import UPDATE_CONFIG
 
 
@@ -310,155 +310,79 @@ class ManageCommandsMixin:
         return suggestions
 
     def do_delete(self, arg):
-        """删除书籍: delete <选择器> [--dry-run] [--force/--yes] [--keep-file]
+        """删除书籍: delete <ID/选择器>
 
-        选择器支持:
-        1) 单个 ID: delete 12
-        2) 多个 ID: delete 1,2,3
-        3) ID 范围: delete 10-20
-        4) 全部: delete all
-        5) 过滤器: delete author:佚名 status:1
-                 delete series:魔法系列 tag:变身
-                 delete type:txt
+        功能:
+        删除指定的书籍记录，并根据配置询问是否删除源文件。
 
-        选项:
-        - --dry-run: 仅预览将要删除的项目，不执行删除
-        - --force/--yes: 跳过 yes 二次确认
-        - --keep-file: 只删除数据库记录，不删除磁盘文件
+        参数:
+        - ID: 书籍 ID (如 1, 2, 3) 或范围 (1-5, 8)
+        - 选择器: search 命令支持的过滤器 (如 author:某某)
 
-        注意:
-        - 默认会删除磁盘文件 + 数据库记录，且需要输入 yes 二次确认喵！
+        示例:
+        delete 10
+        delete 1-5, 8
+        delete author:佚名
         """
-
-        args = shlex.split((arg or "").strip())
+        args = shlex.split(arg or "")
         if not args:
-            print(Colors.red('参数不够喵！示例: delete 12'))
+            print(Colors.red("请指定要删除的书籍 ID 或选择器喵~"))
             return
 
-        def row_val(r, key, default=""):
-            try:
-                return r[key]
-            except Exception:
-                return default
-
-        dry_run = False
-        force = False
-        keep_file = False
-
-        rest = []
-        for t in args:
-            if t in {"--dry-run"}:
-                dry_run = True
-                continue
-            if t in {"--force", "--yes"}:
-                force = True
-                continue
-            if t in {"--keep-file"}:
-                keep_file = True
-                continue
-            if t.startswith("--"):
-                print(Colors.yellow(f"未知参数已忽略喵: {t}"))
-                continue
-            rest.append(t)
-
-        if not rest:
-            print(Colors.red('参数不够喵！示例: delete 12'))
-            return
-
-        selector = rest[0]
-        sel_lower = str(selector).strip().lower()
-
-        books = []
-        try:
-            if sel_lower == "all":
-                if len(rest) == 1:
-                    books = list(self.db.list_books())
-                else:
-                    q, f = parse_query_args(rest[1:], strict_id_mode=True)
-                    books = list(self.db.advanced_search(q, f))
-            else:
-                q, f = parse_query_args(rest, strict_id_mode=True)
-                if not q and not f:
-                    print(Colors.red('没有找到可用的选择器喵！示例: delete 12 或 delete author:佚名'))
-                    return
-                books = list(self.db.advanced_search(q, f))
-        except Exception as e:
-            print(Colors.red(f"出错了喵... {e}"))
-            return
+        query_str, filters = parse_query_args(args, strict_id_mode=True)
+        books = self.db.search_books(filters=filters, query=query_str)
 
         if not books:
-            print(Colors.yellow("没有找到要删除的书喵~"))
+            print(Colors.yellow("找不到符合条件的书籍喵..."))
             return
 
-        books.sort(key=lambda b: int(row_val(b, "id", 0) or 0))
+        count = len(books)
+        print(Colors.cyan(f"找到 {count} 本书，准备删除喵:"))
+        for b in books[:10]:
+            print(f"  - [{b['id']}] {b['title']} ({b['author']})")
+        if count > 10:
+            print(f"  ... 等 {count} 本")
 
-        print(Colors.yellow(f"将要删除 {len(books)} 本书喵:"))
-        show_n = 50
-        for i, book in enumerate(books[:show_n]):
-            bid = row_val(book, "id", "?")
-            title = row_val(book, "title", "")
-            author = row_val(book, "author", "")
-            status_str = "完结" if int(row_val(book, "status", 0) or 0) == 1 else "连载"
-            s_color = Colors.green(status_str) if status_str == "完结" else Colors.pink(status_str)
-            series = row_val(book, "series", "")
-            series_str = f" [系列: {Colors.cyan(series)}]" if series else ""
-            tags_view = self._format_tags_hash(row_val(book, "tags", ""))
-            tags_str = f" {Colors.cyan(tags_view)}" if tags_view else ""
-            print(
-                f"[{Colors.yellow(str(bid))}] {Colors.BOLD}{title}{Colors.RESET} - "
-                f"{Colors.green(author)} ({s_color}){series_str}{tags_str}"
-            )
-        if len(books) > show_n:
-            print(Colors.cyan(f"... 还有 {len(books) - show_n} 本未展示喵"))
-
-        if keep_file:
-            print(Colors.cyan("--keep-file 已开启：只删数据库记录，不删磁盘文件喵~"))
-
-        if dry_run:
-            print(Colors.green("预览结束喵！没有执行删除。"))
+        confirm = input(Colors.red("确认要删除这些记录吗？(y/N): ")).strip().lower()
+        if confirm != "y":
+            print(Colors.green("操作已取消喵。"))
             return
 
-        if not force:
-            confirm = input(Colors.pink("输入 yes/y 确认删除: ")).strip().lower()
-            if confirm not in {"y", "yes"}:
-                print(Colors.cyan("操作取消了喵~"))
-                return
+        del_files = False
+        ans = input(Colors.pink("是否同时删除源文件？(y/N): ")).strip().lower()
+        if ans == "y":
+            del_files = True
 
-        file_deleted = 0
-        file_failed = 0
-        db_deleted = 0
-        db_failed = 0
-
-        for book in books:
-            bid = int(row_val(book, "id", 0) or 0)
-            fp = row_val(book, "file_path", "")
-
-            if not keep_file:
-                try:
+        success = 0
+        for b in books:
+            bid = b['id']
+            if self.db.delete_book(bid):
+                success += 1
+                if del_files:
+                    fp = b['file_path']
                     if fp and self.fm.delete_file(fp):
-                        file_deleted += 1
-                    else:
-                        file_failed += 1
-                except Exception:
-                    file_failed += 1
+                        print(Colors.green(f"  -> 已删除文件: {fp}"))
+                    elif fp:
+                        print(Colors.yellow(f"  -> 文件删除失败或不存在: {fp}"))
 
-            try:
-                if self.db.delete_book(bid):
-                    db_deleted += 1
-                else:
-                    db_failed += 1
-            except Exception:
-                db_failed += 1
+        print(Colors.green(f"成功删除了 {success} 条记录喵！"))
 
-        msg = [f"数据库已删除 {db_deleted} 条"]
-        if db_failed:
-            msg.append(f"失败 {db_failed} 条")
-        if not keep_file:
-            msg.append(f"文件已删除 {file_deleted} 个")
-            if file_failed:
-                msg.append(f"文件删除失败 {file_failed} 个")
+    def complete_update(self, text, line, begidx, endidx):
+        fields = ["title=", "author=", "series=", "status=", "tags=", "--dry-run"]
+        try:
+            books = self.db.list_books() or []
+            ids = [str(b['id']) for b in books]
+            return simple_complete(text, fields + ids)
+        except:
+            return simple_complete(text, fields)
 
-        print(Colors.green("删除完成喵！" + "，".join(msg)))
+    def complete_delete(self, text, line, begidx, endidx):
+        try:
+            books = self.db.list_books() or []
+            ids = [str(b['id']) for b in books]
+            return simple_complete(text, ids)
+        except:
+            return []
 
     def do_update(self, arg):
         """修改书籍信息: update <选择器> [field=value] ...

@@ -4,7 +4,7 @@ import difflib
 import shlex
 import shutil
 
-from .utils import Colors
+from .utils import Colors, simple_complete, path_complete
 
 
 class SystemCommandsMixin:
@@ -929,6 +929,7 @@ class SystemCommandsMixin:
                 extra2.append(f"标记作者 {renamed} 个")
             print(Colors.green("同步完成喵！" + ("（" + "，".join(extra2) + "）" if extra2 else "")))
 
+
     def do_optimize(self, arg):
         """优化数据库: optimize [--yes]
 
@@ -1015,6 +1016,18 @@ class SystemCommandsMixin:
 
         except Exception as e:
             print(Colors.red(f"发生错误: {e}"))
+
+    def complete_clean(self, text, line, begidx, endidx):
+        opts = ["--sync", "--dry-run", "--yes", "--keep-illegal", "--delete-illegal"]
+        return simple_complete(text, opts)
+
+    def complete_optimize(self, text, line, begidx, endidx):
+        opts = ["--yes"]
+        return simple_complete(text, opts)
+
+    def complete_help(self, text, line, begidx, endidx):
+        cmds = [c[3:] for c in self.get_names() if c.startswith("do_")]
+        return simple_complete(text, cmds)
 
     def preloop(self):
         self.do_clean(silent=True)

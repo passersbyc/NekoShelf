@@ -1,5 +1,6 @@
 from .config import IMPORT_CONFIG
 from .import_engine import ImportEngine
+from .utils import path_complete
 
 
 class ImportCommandsMixin:
@@ -136,3 +137,6 @@ class ImportCommandsMixin:
         4) /path/to/book.txt  (直接粘贴路径也可导入)
         """
         return self._engine().run(arg)
+
+    def complete_import(self, text, line, begidx, endidx):
+        return path_complete(text)

@@ -2,7 +2,7 @@ import shlex
 import shutil
 import unicodedata
 
-from .utils import Colors, parse_id_ranges, parse_query_args
+from .utils import Colors, parse_id_ranges, parse_query_args, simple_complete
 
 
 class QueryCommandsMixin:
@@ -419,132 +419,70 @@ class QueryCommandsMixin:
                 f"{Colors.green(book['author'])} ({s_color}){series_str}{tags_str}"
             )
 
-    def complete_search(self, text, line, begidx, endidx):
-        def safe_split(s):
-            try:
-                return shlex.split(s)
-            except Exception:
-                return str(s).split()
+    def do_open(self, arg):
+        """打开书籍或文件: open <ID>
 
-        before = line[:begidx]
-        tokens_before = safe_split(before)
-        tokens_all = safe_split(line)
+        功能:
+        使用系统默认程序打开指定 ID 的书籍文件。
+        """
+        import os
+        import sys
+        if not arg:
+            print(Colors.red("请指定书籍 ID 喵~"))
+            return
 
-        args_before = tokens_before[1:] if tokens_before and tokens_before[0] == "search" else tokens_before
-        args_all = tokens_all[1:] if tokens_all and tokens_all[0] == "search" else tokens_all
-
-        def q(v):
-            v = "" if v is None else str(v)
-            v = v.strip()
-            if v == "":
-                return v
-            return shlex.quote(v)
-
-        books = []
         try:
-            books = list(self.db.list_books() or [])
-        except Exception:
-            books = []
+            bid = int(arg.strip())
+            book = self.db.get_book(bid)
+            if not book:
+                print(Colors.red(f"找不到 ID 为 {bid} 的书喵..."))
+                return
+            
+            fp = book['file_path']
+            if not fp or not os.path.exists(fp):
+                print(Colors.red(f"文件不存在喵: {fp}"))
+                return
+                
+            print(Colors.green(f"正在打开: {fp}"))
+            if os.name == 'nt':
+                os.startfile(fp)
+            else:
+                # macOS / Linux
+                import subprocess
+                opener = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.call([opener, fp])
+                
+        except ValueError:
+            print(Colors.red("ID 必须是数字喵！"))
+        except Exception as e:
+            print(Colors.red(f"打开失败喵: {e}"))
 
-        def parse_tags(raw):
-            s = "" if raw is None else str(raw)
-            s = s.replace("，", ",").replace("+", ",").replace("#", " ")
-            parts = []
-            for chunk in s.split(","):
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                for p in chunk.split():
-                    p = p.strip()
-                    if p:
-                        parts.append(p)
-            out = []
-            seen = set()
-            for t in parts:
-                if t in seen:
-                    continue
-                seen.add(t)
-                out.append(t)
-            return out
+    def complete_search(self, text, line, begidx, endidx):
+        # 补全选项和过滤器前缀
+        opts = [
+            "--ids", "--title", "--author", "--tag", "--series", "--status",
+            "author:", "series:", "tag:", "status:", "title:"
+        ]
+        return simple_complete(text, opts)
 
-        if ":" not in text and "=" not in text:
-            keys = ["author:", "series:", "tag:", "status:", "type:", "title:"]
-            cand = [k for k in keys if k.startswith(text)]
-            return cand
+    def complete_list(self, text, line, begidx, endidx):
+        opts = [
+            "--limit", "--sort", "--all", "--desc", "--asc",
+            "author:", "series:", "tag:", "status:", "title:",
+            "limit:", "sort:"
+        ]
+        return simple_complete(text, opts)
 
-        sep = None
-        if ":" in text:
-            sep = ":"
-        elif "=" in text:
-            sep = "="
-
-        if not sep:
+    def complete_open(self, text, line, begidx, endidx):
+        # 补全书籍 ID
+        try:
+            books = self.db.list_books() or []
+            ids = [str(b['id']) for b in books]
+            return simple_complete(text, ids)
+        except:
             return []
 
-        key, prefix = text.split(sep, 1)
-        key = str(key).strip().lower()
-        prefix = "" if prefix is None else str(prefix)
-
-        if key in {"status"}:
-            vals = ["0", "1", "连载", "完结"]
-            out = []
-            for v in vals:
-                if v.startswith(prefix):
-                    out.append(f"{key}{sep}{v}")
-            return out
-
-        if key in {"type", "format", "ext"}:
-            seen = set()
-            types = []
-            for b in books:
-                try:
-                    ft = str(b["file_type"] or "")
-                except Exception:
-                    ft = ""
-                ft = ft.strip().lstrip(".")
-                if not ft or ft in seen:
-                    continue
-                seen.add(ft)
-                types.append(ft)
-            types.sort()
-            return [f"{key}{sep}{q(v)}" for v in types if v.startswith(prefix)][:200]
-
-        if key in {"author", "series", "title"}:
-            seen = set()
-            vals = []
-            for b in books:
-                try:
-                    v = str(b[key] or "")
-                except Exception:
-                    v = ""
-                v = v.strip()
-                if not v or v in seen:
-                    continue
-                seen.add(v)
-                vals.append(v)
-            vals.sort()
-            return [f"{key}{sep}{q(v)}" for v in vals if v.startswith(prefix)][:200]
-
-        if key in {"tag", "tags"}:
-            cnt = {}
-            for b in books:
-                try:
-                    raw = b["tags"]
-                except Exception:
-                    raw = ""
-                for t in parse_tags(raw):
-                    if not t:
-                        continue
-                    cnt[t] = cnt.get(t, 0) + 1
-            tags = sorted(cnt.items(), key=lambda x: (-x[1], x[0]))
-            out = []
-            for t, _ in tags:
-                if t.startswith(prefix):
-                    out.append(f"{key}{sep}{q(t)}")
-                if len(out) >= 200:
-                    break
-            return out
-
+    def complete_stats(self, text, line, begidx, endidx):
         return []
 
     def do_stats(self, arg):
