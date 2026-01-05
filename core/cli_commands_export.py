@@ -130,6 +130,12 @@ class ExportCommandsMixin:
         print(Colors.green(f"导出完成喵！成功处理 {success} 本。"))
 
     def complete_export(self, text, line, begidx, endidx):
+        # 如果正在输入 --format=xxx
+        if text.startswith("--format="):
+            formats = ["zip", "json", "csv", "copy"]
+            prefix = "--format="
+            return [prefix + f for f in formats if (prefix + f).startswith(text)]
+            
         opts = ["--format=", "--output="]
         try:
             books = self.db.list_books() or []
