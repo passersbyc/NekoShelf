@@ -794,18 +794,90 @@ class SystemCommandsMixin:
 
                 if not os.path.isdir(old_dir):
                     continue
+                
+                # 定义合并函数
+                def merge_dir_content(src, dst):
+                    import shutil
+                    import time
+                    
+                    if not os.path.exists(dst):
+                        os.makedirs(dst)
+                        
+                    for item in os.listdir(src):
+                        s = os.path.join(src, item)
+                        d = os.path.join(dst, item)
+                        
+                        if os.path.isdir(s):
+                            # 递归合并子目录
+                            if os.path.exists(d) and os.path.isdir(d):
+                                merge_dir_content(s, d)
+                                try:
+                                    os.rmdir(s)
+                                except Exception:
+                                    pass
+                            elif os.path.exists(d):
+                                # 目标是文件，冲突 -> 重命名源目录移动
+                                ts = int(time.time() * 1000)
+                                d_new = f"{d}_{ts}"
+                                shutil.move(s, d_new)
+                                # 更新该目录下所有书籍的 DB 记录
+                                try:
+                                    s_prefix = s + os.sep
+                                    d_prefix = d_new + os.sep
+                                    self.db.conn.execute(
+                                        "UPDATE books SET file_path = REPLACE(file_path, ?, ?) WHERE file_path LIKE ?",
+                                        (s_prefix, d_prefix, s_prefix + "%")
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                # 目标不存在，直接移动
+                                shutil.move(s, d)
+                        else:
+                            # 文件
+                            final_dst = d
+                            if os.path.exists(d):
+                                # 冲突 -> 重命名
+                                base, ext = os.path.splitext(item)
+                                ts = int(time.time() * 1000)
+                                final_dst = os.path.join(dst, f"{base}_{ts}{ext}")
+                                shutil.move(s, final_dst)
+                                # 单独更新 DB
+                                try:
+                                    self.db.conn.execute(
+                                        "UPDATE books SET file_path = ? WHERE file_path = ?",
+                                        (final_dst, s)
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                shutil.move(s, d)
+
                 if os.path.exists(new_dir):
                     if not silent:
-                        print(Colors.yellow(f"目标作者目录已存在，跳过标记喵: {new_dir}"))
-                    continue
-
-                try:
-                    os.rename(old_dir, new_dir)
-                    renamed += 1
-                except Exception:
-                    if not silent:
-                        print(Colors.red(f"作者目录改名失败喵: {old_dir} -> {new_dir}"))
-                    continue
+                        print(Colors.yellow(f"目标作者目录已存在，正在合并喵: {new_dir}"))
+                    
+                    try:
+                        merge_dir_content(old_dir, new_dir)
+                        # 尝试删除旧目录
+                        try:
+                            if not os.listdir(old_dir):
+                                os.rmdir(old_dir)
+                        except Exception:
+                            pass
+                        renamed += 1
+                    except Exception as e:
+                        if not silent:
+                            print(Colors.red(f"合并目录失败喵: {e}"))
+                        continue
+                else:
+                    try:
+                        os.rename(old_dir, new_dir)
+                        renamed += 1
+                    except Exception:
+                        if not silent:
+                            print(Colors.red(f"作者目录改名失败喵: {old_dir} -> {new_dir}"))
+                        continue
 
                 try:
                     prefix_old = os.path.normpath(os.path.join(lib_root, old_name)) + os.sep
