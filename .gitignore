@@ -6,4 +6,4 @@ __pycache__
 core/__pycache__
 ._*
 *.pyc
-
+._.gitignore
