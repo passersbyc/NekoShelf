@@ -27,6 +27,27 @@ class FileManager:
             out.append(ch)
         return "".join(out).strip()
 
+    def _resolve_author_dir(self, safe_author):
+        # 1. 优先检查精确匹配
+        exact_path = self.library_dir / safe_author
+        if exact_path.exists():
+            return exact_path
+            
+        # 2. 检查带前缀的目录 (例如: 【漫画】Author)
+        # 遍历库目录，寻找以 safe_author 结尾且前缀合法的目录
+        if self.library_dir.exists():
+            for path in self.library_dir.iterdir():
+                if path.is_dir():
+                    name = path.name
+                    if name.endswith(safe_author):
+                        prefix = name[:-len(safe_author)]
+                        # 如果前缀以 ] 或 】 结尾，视为同一作者目录
+                        if prefix and (prefix.endswith('】') or prefix.endswith(']')):
+                            return path
+        
+        # 3. 默认为精确路径 (如果不存在，后续会创建)
+        return exact_path
+
     def import_file(self, source_path, title, author, series=""):
         source = Path(source_path)
         if not source.exists():
@@ -35,8 +56,8 @@ class FileManager:
         safe_author = self._sanitize_component(author) or "佚名"
         safe_title = self._sanitize_component(title) or "未命名"
         
-        # 创建作者目录
-        author_dir = self.library_dir / safe_author
+        # 确定作者目录 (自动识别现有带前缀的目录)
+        author_dir = self._resolve_author_dir(safe_author)
         if not author_dir.exists():
             author_dir.mkdir(parents=True)
 
@@ -87,7 +108,7 @@ class FileManager:
         safe_author = self._sanitize_component(new_author) or "佚名"
         safe_title = self._sanitize_component(new_title) or "未命名"
         
-        author_dir = self.library_dir / safe_author
+        author_dir = self._resolve_author_dir(safe_author)
         if not author_dir.exists():
             author_dir.mkdir(parents=True)
             
