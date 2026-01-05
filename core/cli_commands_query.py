@@ -75,6 +75,14 @@ class QueryCommandsMixin:
         - --path: 额外显示文件路径
         - --compact: 紧凑显示(隐藏标签列)
 
+        支持的过滤器:
+        - ids:1,3-5      - 搜索特定ID范围
+        - author:作者名   - 搜索特定作者
+        - series:系列名   - 搜索特定系列
+        - tag:标签       - 搜索特定标签
+        - status:1/0     - 1=完结, 0=连载
+        - type:格式      - 如 txt, pdf
+
         示例:
         list
         list 1-10
@@ -198,89 +206,135 @@ class QueryCommandsMixin:
         show_tags = not compact
         term_width = shutil.get_terminal_size((120, 20)).columns
 
-        id_w = max(self._disp_width("ID"), max(self._disp_width(str(val(b, "id", ""))) for b in books))
-        id_w = max(2, min(id_w, 6))
+        # --- 动态计算列宽 (优化版) ---
+        
+        # 1. 定义获取列内容最大宽度的辅助函数
+        def get_col_max(key, header, min_w, max_cap):
+            w = self._disp_width(header)
+            for b in books:
+                # 特殊处理 status
+                if key == "status":
+                    v = "完结" if val(b, "status", 0) == 1 else "连载"
+                else:
+                    v = str(val(b, key, "") or "")
+                w = max(w, self._disp_width(v))
+            # 限制在 [min_w, max_cap] 之间
+            return max(min_w, min(w, max_cap))
 
-        status_w = self._disp_width("状态")
-        status_w = max(status_w, self._disp_width("连载"))
-        status_w = max(4, min(status_w, 6))
+        # 2. 根据终端宽度设定动态上限 (Smart Caps)
+        # ID: 固定短小
+        id_w = get_col_max("id", "ID", 2, 6)
+        
+        # Status/Format: 固定短小
+        status_w = max(self._disp_width("状态"), self._disp_width("连载")) # 至少能放下"连载"
+        fmt_w = get_col_max("file_type", "格式", 4, 8)
 
-        fmt_w = max(self._disp_width("格式"), 4)
-        fmt_w = min(fmt_w, 6)
+        # 变长列: Title, Author, Series
+        # 策略: 标题给最多空间(35-40%), 作者和系列次之(15-20%)
+        # 但也要设置一个合理的绝对最小值和最大值
+        
+        # 计算剩余可用空间基数 (假设无Tag, 无分隔符)
+        avail = term_width 
+        
+        title_cap = max(30, int(avail * 0.40))   # 至少30，最多40%屏幕
+        author_cap = max(15, int(avail * 0.20))  # 至少15，最多20%屏幕
+        series_cap = max(15, int(avail * 0.20))  # 至少15，最多20%屏幕
 
-        title_max = max(self._disp_width(str(val(b, "title", "") or "")) for b in books)
-        author_max = max(self._disp_width(str(val(b, "author", "") or "")) for b in books)
-        series_max = max(self._disp_width(str(val(b, "series", "") or "")) for b in books)
+        title_w = get_col_max("title", "标题", 10, title_cap)
+        author_w = get_col_max("author", "作者", 8, author_cap)
+        series_w = get_col_max("series", "系列", 8, series_cap)
 
-        title_w = max(self._disp_width("标题"), min(title_max, 30))
-        author_w = max(self._disp_width("作者"), min(author_max, 18))
-        series_w = max(self._disp_width("系列"), min(series_max, 16))
+        # 3. 布局计算与压缩 (Shrink)
+        sep = " │ "
+        sep_w = self._disp_width(sep)
+        
+        # 基础列 (不含 Tags)
+        # ID | Title | Author | Status | Format | Series
+        base_cols = [id_w, title_w, author_w, status_w, fmt_w, series_w]
+        total_sep_w = sep_w * (len(base_cols) + (1 if show_tags else 0) - 1) # Tags前也有分隔符
+        
+        # Tags 预留
+        tags_min = 10
+        tags_w = 0
+        
+        # 计算总需求
+        total_need = sum(base_cols) + total_sep_w + (tags_min if show_tags else 0)
+        
+        # 压缩函数
+        def shrink(col_w, min_limit, need_to_cut):
+            if need_to_cut <= 0: return col_w, need_to_cut
+            can_cut = max(0, col_w - min_limit)
+            cut = min(need_to_cut, can_cut)
+            return col_w - cut, need_to_cut - cut
 
-        sep = "   "
-        base_total = id_w + title_w + author_w + status_w + fmt_w + series_w + len(sep) * 5
-        tags_min = max(self._disp_width("标签"), 10)
+        overflow = total_need - term_width
+        
+        # 压缩优先级: Series -> Author -> Title
+        if overflow > 0:
+            series_w, overflow = shrink(series_w, 8, overflow)
+            author_w, overflow = shrink(author_w, 8, overflow)
+            title_w, overflow = shrink(title_w, 10, overflow)
+            # 如果还不够，Tags 只能拿最小了(或者不显示?)，这里不再压缩固定列
 
-        def shrink(col_w, min_w, need):
-            if need <= 0:
-                return col_w, need
-            can = max(0, col_w - min_w)
-            take = min(need, can)
-            return col_w - take, need - take
-
-        need = max(0, (base_total + (len(sep) + tags_min if show_tags else 0)) - term_width)
-        title_w, need = shrink(title_w, 10, need)
-        series_w, need = shrink(series_w, 8, need)
-        author_w, need = shrink(author_w, 8, need)
-
-        base_total = id_w + title_w + author_w + status_w + fmt_w + series_w + len(sep) * 5
+        # 计算最终 Tags 宽度
+        current_used = id_w + title_w + author_w + status_w + fmt_w + series_w + total_sep_w
         if show_tags:
-            tags_w = max(tags_min, term_width - (base_total + len(sep)))
-        else:
-            tags_w = 0
-
+            tags_w = max(tags_min, term_width - current_used)
+        
+        # 4. 渲染表头
         h_id = self._pad_disp("ID", id_w, align="right")
         h_title = self._pad_disp("标题", title_w)
         h_author = self._pad_disp("作者", author_w)
         h_status = self._pad_disp("状态", status_w)
         h_fmt = self._pad_disp("格式", fmt_w)
         h_series = self._pad_disp("系列", series_w)
-        h_tags = "标签"
-
+        
         header_parts = [h_id, h_title, h_author, h_status, h_fmt, h_series]
         if show_tags:
-            header_parts.append(h_tags)
-        header = sep.join(header_parts)
-        print(Colors.cyan(Colors.BOLD + header + Colors.RESET))
-        print(Colors.cyan("─" * min(self._disp_width(header), term_width)))
+            header_parts.append("标签") # 标签列标题不填充，靠左即可
+            
+        header_str = sep.join(header_parts)
+        print(Colors.cyan(Colors.BOLD + header_str + Colors.RESET))
+        
+        # 分隔线
+        # 使用更像表格的横线
+        line_len = min(self._disp_width(header_str), term_width)
+        print(Colors.cyan("─" * line_len))
 
+        # 5. 渲染数据行
         for book in books:
             bid = self._pad_disp(str(val(book, "id", "")), id_w, align="right")
-            title_raw = str(val(book, "title", "") or "")
-            author_raw = str(val(book, "author", "") or "")
-            series_raw = str(val(book, "series", "") or "")
-            tags_raw = str(val(book, "tags", "") or "")
-            ftype_raw = str(val(book, "file_type", "") or "")
+            
+            t_val = str(val(book, "title", "") or "")
+            a_val = str(val(book, "author", "") or "")
+            s_val = str(val(book, "series", "") or "")
+            tags_val = str(val(book, "tags", "") or "")
+            f_val = str(val(book, "file_type", "") or "")
+            st_val = "完结" if val(book, "status", 0) == 1 else "连载"
 
-            title = self._pad_disp(self._truncate_disp(title_raw, title_w), title_w)
-            author = self._pad_disp(self._truncate_disp(author_raw, author_w), author_w)
-
-            s_raw = "完结" if val(book, "status", 0) == 1 else "连载"
-            status = self._pad_disp(s_raw, status_w)
-
-            ftype = self._pad_disp(self._truncate_disp(ftype_raw, fmt_w), fmt_w)
-            series = self._pad_disp(self._truncate_disp(series_raw, series_w), series_w)
-            tags_view = self._format_tags_hash(tags_raw)
+            # 截断处理
+            title = self._pad_disp(self._truncate_disp(t_val, title_w), title_w)
+            author = self._pad_disp(self._truncate_disp(a_val, author_w), author_w)
+            series = self._pad_disp(self._truncate_disp(s_val, series_w), series_w)
+            ftype = self._pad_disp(self._truncate_disp(f_val, fmt_w), fmt_w)
+            status = self._pad_disp(st_val, status_w)
+            
+            # Tags 处理
+            tags_view = self._format_tags_hash(tags_val)
             tags = self._truncate_disp(tags_view, tags_w) if show_tags else ""
 
+            # 颜色
             c_id = Colors.yellow(bid)
             c_title = Colors.BOLD + title + Colors.RESET
             c_author = Colors.green(author)
-            c_status = Colors.green(status) if val(book, "status", 0) == 1 else Colors.pink(status)
+            c_status = Colors.green(status) if st_val == "完结" else Colors.pink(status)
             c_series = Colors.cyan(series)
+            c_fmt = ftype # 格式不加色或保持默认
 
-            row_parts = [c_id, c_title, c_author, c_status, ftype, c_series]
+            row_parts = [c_id, c_title, c_author, c_status, c_fmt, c_series]
             if show_tags:
-                row_parts.append(tags)
+                row_parts.append(tags) # Tags 自带颜色吗？_format_tags_hash没加颜色，这里可以不加或加灰
+            
             print(sep.join(row_parts))
 
             if show_path:
@@ -320,6 +374,16 @@ class QueryCommandsMixin:
             return
 
         args = shlex.split(arg)
+        
+        # Check for --ids flag
+        show_ids_only = False
+        if "--ids" in args:
+            show_ids_only = True
+            args.remove("--ids")
+            if not args:
+                print(Colors.red("请输入搜索内容喵！"))
+                return
+        
         query, filters = parse_query_args(args, strict_id_mode=False)
         
         books = self.db.advanced_search(query, filters)
@@ -335,6 +399,13 @@ class QueryCommandsMixin:
                 return ""
 
         books = sorted(list(books), key=title_key, reverse=False)
+        
+        if show_ids_only:
+            ids = sorted([str(b["id"]) for b in books], key=lambda x: int(x))
+            joined = ",".join(ids)
+            print(Colors.cyan(f"匹配到 {len(books)} 本，ID 列表喵:"))
+            print(Colors.yellow(joined))
+            return
 
         print(Colors.green(f"找到 {len(books)} 本书喵:"))
         for book in books:
