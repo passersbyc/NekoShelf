@@ -2,6 +2,7 @@ import os
 import re
 import difflib
 import shlex
+import shutil
 
 from .utils import Colors
 
@@ -859,12 +860,12 @@ class SystemCommandsMixin:
                     
                     try:
                         merge_dir_content(old_dir, new_dir)
-                        # 尝试删除旧目录
+                        # 尝试删除旧目录 (使用 rmtree 确保彻底删除)
                         try:
-                            if not os.listdir(old_dir):
-                                os.rmdir(old_dir)
-                        except Exception:
-                            pass
+                            shutil.rmtree(old_dir)
+                        except Exception as e:
+                            if not silent:
+                                print(Colors.red(f"删除旧目录失败喵: {e}"))
                         renamed += 1
                     except Exception as e:
                         if not silent:
