@@ -115,6 +115,17 @@ class DatabaseManager:
         cursor.execute('SELECT * FROM books ORDER BY created_at DESC')
         return cursor.fetchall()
 
+    def list_authors(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT a.id, a.name, COUNT(b.id) as book_count
+            FROM authors a
+            LEFT JOIN books b ON b.author = a.name
+            GROUP BY a.id
+            ORDER BY book_count DESC, a.name ASC
+        ''')
+        return cursor.fetchall()
+
     def search_books(self, keyword):
         cursor = self.conn.cursor()
         pattern = f"%{keyword}%"

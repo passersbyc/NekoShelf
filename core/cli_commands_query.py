@@ -342,6 +342,83 @@ class QueryCommandsMixin:
                 p = self._truncate_disp(p_raw, max(10, term_width - 4))
                 print(Colors.cyan(f"  ↳ {p}"))
 
+    def do_authors(self, arg):
+        """列出作者: authors [关键词]
+
+        功能:
+        显示所有作者及其藏书数量。
+        支持按名字搜索。
+
+        示例:
+        authors
+        authors 鲁迅
+        """
+        all_authors = self.db.list_authors()
+        if not all_authors:
+            print(Colors.yellow("还没有记录任何作者喵..."))
+            return
+
+        # 简单过滤
+        if arg:
+            keyword = arg.strip().lower()
+            authors = [a for a in all_authors if keyword in str(a['name']).lower()]
+            if not authors:
+                print(Colors.yellow(f"找不到名字包含 '{keyword}' 的作者喵..."))
+                return
+        else:
+            authors = all_authors
+
+        term_width = shutil.get_terminal_size((80, 20)).columns
+        
+        # 计算列宽
+        # ID: 自动适应
+        id_w = max([len(str(a['id'])) for a in authors] + [2])
+        
+        # Count: 自动适应
+        count_w = max([len(str(a['book_count'])) for a in authors] + [4]) # "藏书" len=4 (width) ? "藏书" width is 4
+        
+        # Name: 动态计算
+        max_name_w = 0
+        for a in authors:
+            max_name_w = max(max_name_w, self._disp_width(a['name']))
+        
+        # ID | Name | Count
+        # sep = " │ " (3 chars)
+        sep = " │ "
+        sep_w = 3
+        
+        avail_name = term_width - (id_w + count_w + sep_w * 2)
+        name_w = min(max_name_w, avail_name)
+        name_w = max(name_w, 10) # 至少留10
+        
+        # Header
+        h_id = self._pad_disp("ID", id_w, align="right")
+        h_name = self._pad_disp("作者名", name_w)
+        h_count = self._pad_disp("藏书", count_w, align="right")
+        
+        header_str = f"{h_id}{sep}{h_name}{sep}{h_count}"
+        print(Colors.cyan(Colors.BOLD + header_str + Colors.RESET))
+        print(Colors.cyan("─" * min(self._disp_width(header_str), term_width)))
+        
+        for a in authors:
+            aid = self._pad_disp(str(a['id']), id_w, align="right")
+            
+            raw_name = str(a['name'])
+            disp_name = self._truncate_disp(raw_name, name_w)
+            aname = self._pad_disp(disp_name, name_w)
+            
+            acount = self._pad_disp(str(a['book_count']), count_w, align="right")
+            
+            print(f"{Colors.yellow(aid)}{sep}{Colors.green(aname)}{sep}{Colors.cyan(acount)}")
+
+    def complete_authors(self, text, line, begidx, endidx):
+        try:
+            authors = self.db.list_authors()
+            names = [str(a['name']) for a in authors]
+            return simple_complete(text, names)
+        except:
+            return []
+
     def do_search(self, arg):
         """搜索书籍: search [关键词] [field:value] ...
 
