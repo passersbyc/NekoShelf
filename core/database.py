@@ -44,7 +44,33 @@ class DatabaseManager:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_books_file_hash ON books(file_hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_books_file_path ON books(file_path)")
         
+        # 创建 authors 表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS authors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # 尝试从 books 表同步作者到 authors 表
+        cursor.execute('''
+            INSERT OR IGNORE INTO authors (name)
+            SELECT DISTINCT author FROM books 
+            WHERE author IS NOT NULL AND author != ""
+        ''')
+
         self.conn.commit()
+
+    def _ensure_author(self, name):
+        if not name:
+            return
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('INSERT OR IGNORE INTO authors (name) VALUES (?)', (name,))
+            self.conn.commit()
+        except Exception:
+            pass
 
     def add_book(self, title, author, tags, status, series, file_path, file_type, file_hash=None):
         cursor = self.conn.cursor()
@@ -53,6 +79,10 @@ class DatabaseManager:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (title, author, tags, status, series, file_path, file_hash, file_type))
         self.conn.commit()
+        
+        # 确保作者存在于 authors 表
+        self._ensure_author(author)
+        
         return cursor.lastrowid
 
     def find_books_by_file_hash(self, file_hash, limit=20):
@@ -234,6 +264,10 @@ class DatabaseManager:
     def update_book(self, book_id, **kwargs):
         if not kwargs:
             return False
+        
+        # 如果更新了作者，确保作者存在于 authors 表
+        if 'author' in kwargs:
+            self._ensure_author(kwargs['author'])
         
         columns = ", ".join(f"{key} = ?" for key in kwargs.keys())
         values = list(kwargs.values())
