@@ -10,7 +10,7 @@ except Exception:
 from .database import DatabaseManager
 from .file_manager import FileManager
 from .utils import Colors
-from .config import DB_FILE, LIBRARY_DIR
+from .config import DB_FILE, LIBRARY_DIR, VERSION
 from .cli_commands_library import LibraryCommandsMixin
 from .cli_commands_query import QueryCommandsMixin
 from .cli_commands_manage import ManageCommandsMixin
@@ -139,7 +139,7 @@ class MoeCLI(
 
         lines = []
         lines.append(f"{Colors.HEADER}{Colors.BOLD}╔══════════════════════════════════════════════════════╗{Colors.RESET}")
-        lines.append(f"{Colors.HEADER}{Colors.BOLD}║{Colors.RESET}   /\\_/\\    {Colors.BOLD}萌萌的本地化漫画小说自动管理系统{Colors.RESET}          {Colors.HEADER}{Colors.BOLD}║{Colors.RESET}")
+        lines.append(f"{Colors.HEADER}{Colors.BOLD}║{Colors.RESET}   /\\_/\\    {Colors.BOLD}萌萌的本地化漫画小说自动管理系统 v{VERSION}{Colors.RESET}     {Colors.HEADER}{Colors.BOLD}║{Colors.RESET}")
         lines.append(f"{Colors.HEADER}{Colors.BOLD}║{Colors.RESET}  ( o.o )    {Colors.CYAN}help {Colors.RESET} 查看命令   {Colors.CYAN}exit{Colors.RESET} 退出               {Colors.HEADER}{Colors.BOLD}║{Colors.RESET}")
         lines.append(f"{Colors.HEADER}{Colors.BOLD}║{Colors.RESET}   > ^ <     {Colors.YELLOW}本地书库{Colors.RESET}: {Colors.green(str(total))} 本                         {Colors.HEADER}{Colors.BOLD}║{Colors.RESET}")
         lines.append(f"{Colors.HEADER}{Colors.BOLD}╚══════════════════════════════════════════════════════╝{Colors.RESET}")

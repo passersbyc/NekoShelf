@@ -1,4 +1,5 @@
 # 配置
+VERSION = "1.1"
 LIBRARY_DIR = "library"
 DB_FILE = "library.db"
 

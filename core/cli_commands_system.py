@@ -4,10 +4,16 @@ import difflib
 import shlex
 import shutil
 
+from .config import VERSION
 from .utils import Colors, simple_complete, path_complete
 
 
 class SystemCommandsMixin:
+    def do_version(self, arg):
+        """显示当前版本信息"""
+        print(f"{Colors.GREEN}NekoShelf v{VERSION}{Colors.RESET}")
+        print(f"{Colors.CYAN}萌萌的本地化漫画小说自动管理系统{Colors.RESET}")
+
     def _cmd_names(self):
         return sorted(
             {
