@@ -357,8 +357,11 @@ class QueryCommandsMixin:
         功能:
         1. 显示所有作者及其详细信息（收录状态、最新作品、联系方式）。
         2. 支持按名字搜索。
+
+        提示:
+        推荐使用 update 命令修改作者信息: update author <ID> full=1 ...
         
-        选项:
+        旧版选项 (仍可用):
         - --set-full <ID> <0/1>: 设置收录状态 (1=全集, 0=散录)
         - --set-date <ID> <日期>: 设置最新作品日期 (如 2024-01-01)
         - --set-contact <ID> <内容>: 设置联系方式
@@ -367,8 +370,6 @@ class QueryCommandsMixin:
         authors
         authors 鲁迅
         authors --set-full 1 1         (设置 ID=1 的作者为全集)
-        authors --set-date 1 2024-01-05
-        authors --set-contact 1 "twitter@xxx"
         """
         args = shlex.split(arg or "")
         

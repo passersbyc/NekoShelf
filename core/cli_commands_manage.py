@@ -384,9 +384,71 @@ class ManageCommandsMixin:
         except:
             return []
 
-    def do_update(self, arg):
-        """修改书籍信息: update <选择器> [field=value] ...
+    def _update_authors(self, args):
+        if not args:
+            print(Colors.red("参数不够喵！示例: update author 1 full=1"))
+            return
 
+        try:
+            author_id = int(args[0])
+        except ValueError:
+            print(Colors.red("作者 ID 必须是数字喵！"))
+            return
+
+        updates = {}
+        for item in args[1:]:
+            if "=" not in item:
+                continue
+            key, val = item.split("=", 1)
+            key = key.strip().lower()
+            val = val.strip()
+            
+            if key == "full":
+                if val.lower() in ("true", "yes", "1", "on"):
+                    updates["is_full"] = 1
+                elif val.lower() in ("false", "no", "0", "off"):
+                    updates["is_full"] = 0
+                else:
+                    print(Colors.red(f"full 值无法识别: {val} (请用 0/1)"))
+                    return
+            elif key == "contact":
+                updates["contact"] = val
+            elif key == "date":
+                updates["last_work_date"] = val
+            else:
+                print(Colors.yellow(f"忽略未知字段: {key} (支持 full, contact, date)"))
+
+        if not updates:
+            print(Colors.yellow("没有要更新的内容喵..."))
+            return
+
+        author = self.db.get_author(author_id)
+        if not author:
+            print(Colors.red(f"找不到 ID={author_id} 的作者喵..."))
+            return
+
+        if self.db.update_author(author_id, **updates):
+            name = author['name']
+            msgs = []
+            if "is_full" in updates:
+                status = "全集" if updates["is_full"] else "散录"
+                msgs.append(f"收录状态->{status}")
+            if "contact" in updates:
+                msgs.append(f"联系方式已更新")
+            if "last_work_date" in updates:
+                msgs.append(f"新作日期->{updates['last_work_date']}")
+            
+            print(Colors.green(f"已更新作者 {name}: {', '.join(msgs)}"))
+        else:
+            print(Colors.red("更新失败喵..."))
+
+    def do_update(self, arg):
+        """修改书籍或作者信息: update ...
+
+        1. 修改书籍: update <选择器> [field=value] ...
+        2. 修改作者: update author <ID> [field=value] ...
+
+        === 书籍修改说明 ===
         选择器支持:
         1) 单个 ID: update 12 title=...
         2) 多个 ID: update 1,2,3 status=完结
@@ -424,16 +486,22 @@ class ManageCommandsMixin:
         便捷:
         - 输出匹配 ID 列表: update ids <选择器>
 
+        === 作者修改说明 ===
+        update author <ID> full=1 contact="推特"
+        字段: full (0/1), contact, date (新作日期)
+
         示例:
         1) update 1 title="新标题" author="新作者"
         2) update 1 status=完结 tags="#变身 #换身"
-        3) update 1 tags+="#换身" tags-="#精神" --dry-run
-        4) update 1 --sync
-        5) update series:碧蓝航线ts title="堕04" --dry-run
+        3) update author 1 full=1 contact="twitter"
         """
         args = shlex.split((arg or "").strip())
         if not args:
             print(Colors.red('参数不够喵！示例: update 1 title="新书名"'))
+            return
+
+        if args[0].lower() in ("author", "authors"):
+            self._update_authors(args[1:])
             return
 
         allowed_fields = set(UPDATE_CONFIG.get("allowed_fields") or ["title", "author", "series", "tags", "status"])
