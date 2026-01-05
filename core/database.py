@@ -1,4 +1,5 @@
 import sqlite3
+import datetime
 from .config import DB_FILE
 
 class DatabaseManager:
@@ -25,6 +26,7 @@ class DatabaseManager:
                 file_path TEXT NOT NULL,
                 file_hash TEXT,
                 file_type TEXT,
+                import_date TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -41,6 +43,11 @@ class DatabaseManager:
         if 'file_hash' not in columns:
             cursor.execute("ALTER TABLE books ADD COLUMN file_hash TEXT")
 
+        if 'import_date' not in columns:
+            # 对于旧数据，将 created_at 作为 import_date (如果有的话)，或者当前时间
+            cursor.execute("ALTER TABLE books ADD COLUMN import_date TIMESTAMP")
+            cursor.execute("UPDATE books SET import_date = created_at WHERE import_date IS NULL")
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_books_file_hash ON books(file_hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_books_file_path ON books(file_path)")
         
@@ -49,15 +56,42 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS authors (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
+                is_full INTEGER DEFAULT 0,
+                last_work_date TEXT,
+                contact TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # 检查是否需要添加新字段 (针对旧数据库 authors 表)
+        cursor.execute("PRAGMA table_info(authors)")
+        a_columns = [info[1] for info in cursor.fetchall()]
+        
+        if 'is_full' not in a_columns:
+            cursor.execute("ALTER TABLE authors ADD COLUMN is_full INTEGER DEFAULT 0")
+        if 'last_work_date' not in a_columns:
+            cursor.execute("ALTER TABLE authors ADD COLUMN last_work_date TEXT")
+        if 'contact' not in a_columns:
+            cursor.execute("ALTER TABLE authors ADD COLUMN contact TEXT")
+        if 'last_import_date' not in a_columns:
+            cursor.execute("ALTER TABLE authors ADD COLUMN last_import_date TIMESTAMP")
         
         # 尝试从 books 表同步作者到 authors 表
         cursor.execute('''
             INSERT OR IGNORE INTO authors (name)
             SELECT DISTINCT author FROM books 
             WHERE author IS NOT NULL AND author != ""
+        ''')
+
+        # 回填 authors.last_import_date (从 books.import_date)
+        cursor.execute('''
+            UPDATE authors 
+            SET last_import_date = (
+                SELECT MAX(import_date) 
+                FROM books 
+                WHERE books.author = authors.name
+            )
+            WHERE last_import_date IS NULL
         ''')
 
         self.conn.commit()
@@ -72,18 +106,35 @@ class DatabaseManager:
         except Exception:
             pass
 
-    def add_book(self, title, author, tags, status, series, file_path, file_type, file_hash=None):
+    def add_book(self, title, author, tags, status, series, file_path, file_type, file_hash=None, import_date=None):
+        if import_date is None:
+            import_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT INTO books (title, author, tags, status, series, file_path, file_hash, file_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (title, author, tags, status, series, file_path, file_hash, file_type))
+            INSERT INTO books (title, author, tags, status, series, file_path, file_hash, file_type, import_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (title, author, tags, status, series, file_path, file_hash, file_type, import_date))
         self.conn.commit()
         
         # 确保作者存在于 authors 表
         self._ensure_author(author)
+        # 同步更新作者的最后导入时间
+        self.update_author_import_date(author, import_date)
         
         return cursor.lastrowid
+
+    def update_author_import_date(self, author_name, import_date):
+        if not author_name:
+            return
+        cursor = self.conn.cursor()
+        # 只在新的 import_date 比现有的更新时才更新
+        cursor.execute('''
+            UPDATE authors 
+            SET last_import_date = ? 
+            WHERE name = ? AND (last_import_date IS NULL OR last_import_date < ?)
+        ''', (import_date, author_name, import_date))
+        self.conn.commit()
 
     def find_books_by_file_hash(self, file_hash, limit=20):
         if not file_hash:
@@ -118,13 +169,36 @@ class DatabaseManager:
     def list_authors(self):
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT a.id, a.name, COUNT(b.id) as book_count
+            SELECT a.id, a.name, a.is_full, a.last_work_date, a.last_import_date, a.contact, COUNT(b.id) as book_count
             FROM authors a
             LEFT JOIN books b ON b.author = a.name
             GROUP BY a.id
             ORDER BY book_count DESC, a.name ASC
         ''')
         return cursor.fetchall()
+
+    def update_author(self, author_id, **kwargs):
+        if not kwargs:
+            return False
+        
+        columns = ", ".join(f"{key} = ?" for key in kwargs.keys())
+        values = list(kwargs.values())
+        values.append(author_id)
+        
+        cursor = self.conn.cursor()
+        cursor.execute(f'UPDATE authors SET {columns} WHERE id = ?', values)
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_author(self, author_id):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM authors WHERE id = ?', (author_id,))
+        return cursor.fetchone()
+
+    def get_author_by_name(self, name):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM authors WHERE name = ?', (name,))
+        return cursor.fetchone()
 
     def search_books(self, keyword):
         cursor = self.conn.cursor()

@@ -48,6 +48,15 @@ class QueryCommandsMixin:
             return " " * pad + s
         return s + " " * pad
 
+    def _safe_get(self, row, key, default=""):
+        try:
+            return row[key]
+        except Exception:
+            try:
+                return getattr(row, key)
+            except Exception:
+                return default
+
     def _format_tags_hash(self, tags_raw):
         s = "" if tags_raw is None else str(tags_raw)
         s = s.replace("，", ",").replace("+", ",").strip()
@@ -343,24 +352,86 @@ class QueryCommandsMixin:
                 print(Colors.cyan(f"  ↳ {p}"))
 
     def do_authors(self, arg):
-        """列出作者: authors [关键词]
+        """列出或编辑作者: authors [关键词] [options]
 
         功能:
-        显示所有作者及其藏书数量。
-        支持按名字搜索。
+        1. 显示所有作者及其详细信息（收录状态、最新作品、联系方式）。
+        2. 支持按名字搜索。
+        
+        选项:
+        - --set-full <ID> <0/1>: 设置收录状态 (1=全集, 0=散录)
+        - --set-date <ID> <日期>: 设置最新作品日期 (如 2024-01-01)
+        - --set-contact <ID> <内容>: 设置联系方式
 
         示例:
         authors
         authors 鲁迅
+        authors --set-full 1 1         (设置 ID=1 的作者为全集)
+        authors --set-date 1 2024-01-05
+        authors --set-contact 1 "twitter@xxx"
         """
+        args = shlex.split(arg or "")
+        
+        # --- 编辑模式 ---
+        if args and args[0].startswith("--set-"):
+            if len(args) < 3:
+                print(Colors.red("参数不足喵! 用法: authors --set-xxx <ID> <Value>"))
+                return
+            
+            action = args[0]
+            try:
+                aid = int(args[1])
+            except:
+                print(Colors.red("ID 必须是数字喵!"))
+                return
+            
+            val_str = args[2]
+            
+            # 验证 ID
+            author = self.db.get_author(aid)
+            if not author:
+                print(Colors.red(f"找不到 ID={aid} 的作者喵..."))
+                return
+
+            success = False
+            if action == "--set-full":
+                try:
+                    v = int(val_str)
+                    if v not in (0, 1): raise ValueError
+                    success = self.db.update_author(aid, is_full=v)
+                    print(Colors.green(f"已设置 {author['name']} 的收录状态为: {'全集' if v else '散录'}"))
+                except:
+                    print(Colors.red("状态只能是 0 或 1 喵!"))
+                    return
+            
+            elif action == "--set-date":
+                success = self.db.update_author(aid, last_work_date=val_str)
+                print(Colors.green(f"已更新 {author['name']} 的新作日期: {val_str}"))
+
+            elif action == "--set-contact":
+                success = self.db.update_author(aid, contact=val_str)
+                print(Colors.green(f"已更新 {author['name']} 的联系方式"))
+
+            else:
+                print(Colors.red(f"未知操作: {action}"))
+                return
+
+            if not success:
+                print(Colors.red("更新失败喵..."))
+            return
+
+        # --- 查询模式 ---
         all_authors = self.db.list_authors()
         if not all_authors:
             print(Colors.yellow("还没有记录任何作者喵..."))
             return
 
+        val = self._safe_get
+
         # 简单过滤
-        if arg:
-            keyword = arg.strip().lower()
+        keyword = ""
+        if args:
+            keyword = args[0].strip().lower()
             authors = [a for a in all_authors if keyword in str(a['name']).lower()]
             if not authors:
                 print(Colors.yellow(f"找不到名字包含 '{keyword}' 的作者喵..."))
@@ -375,28 +446,52 @@ class QueryCommandsMixin:
         id_w = max([len(str(a['id'])) for a in authors] + [2])
         
         # Count: 自动适应
-        count_w = max([len(str(a['book_count'])) for a in authors] + [4]) # "藏书" len=4 (width) ? "藏书" width is 4
+        count_w = max([len(str(a['book_count'])) for a in authors] + [4]) # "藏书" len=4 width
+        
+        # New Cols
+        # Full: 4 (全集/散录)
+        full_w = 4
+        
+        # Date: 10 (YYYY-MM-DD) or flexible (Deprecated in display, use import_date)
+        # date_w = 10
+        
+        # Import Date: 10 (YYYY-MM-DD) -> Renamed to "Update"
+        update_w = 10
+        
+        # Contact: flexible
         
         # Name: 动态计算
         max_name_w = 0
         for a in authors:
             max_name_w = max(max_name_w, self._disp_width(a['name']))
         
-        # ID | Name | Count
-        # sep = " │ " (3 chars)
         sep = " │ "
         sep_w = 3
         
-        avail_name = term_width - (id_w + count_w + sep_w * 2)
-        name_w = min(max_name_w, avail_name)
-        name_w = max(name_w, 10) # 至少留10
+        # ID | Name | Full | Count | Update | Contact
+        # Fixed: ID, Full, Count, Update
+        fixed_w = id_w + full_w + count_w + update_w + (sep_w * 5)
+        
+        avail = term_width - fixed_w
+        if avail < 20: # 空间太小，压缩 Name 和 Contact
+            name_w = 10
+            contact_w = max(5, avail - 10)
+        else:
+            # Name 占 40%, Contact 占 60%
+            name_w = min(max_name_w, int(avail * 0.4))
+            name_w = max(name_w, 8)
+            contact_w = avail - name_w
         
         # Header
         h_id = self._pad_disp("ID", id_w, align="right")
         h_name = self._pad_disp("作者名", name_w)
+        h_full = self._pad_disp("收录", full_w)
         h_count = self._pad_disp("藏书", count_w, align="right")
+        # h_date = self._pad_disp("新作", date_w)
+        h_update = self._pad_disp("更新", update_w)
+        h_contact = self._pad_disp("联系方式", contact_w)
         
-        header_str = f"{h_id}{sep}{h_name}{sep}{h_count}"
+        header_str = f"{h_id}{sep}{h_name}{sep}{h_full}{sep}{h_count}{sep}{h_update}{sep}{h_contact}"
         print(Colors.cyan(Colors.BOLD + header_str + Colors.RESET))
         print(Colors.cyan("─" * min(self._disp_width(header_str), term_width)))
         
@@ -407,11 +502,33 @@ class QueryCommandsMixin:
             disp_name = self._truncate_disp(raw_name, name_w)
             aname = self._pad_disp(disp_name, name_w)
             
+            is_full = val(a, "is_full", 0)
+            full_str = "全集" if is_full == 1 else "散录"
+            full_disp = self._pad_disp(full_str, full_w)
+            
             acount = self._pad_disp(str(a['book_count']), count_w, align="right")
             
-            print(f"{Colors.yellow(aid)}{sep}{Colors.green(aname)}{sep}{Colors.cyan(acount)}")
+            # date_val = str(val(a, "last_work_date", "") or "-")
+            # date_disp = self._pad_disp(self._truncate_disp(date_val, date_w), date_w)
+            
+            import_val = str(val(a, "last_import_date", "") or "-")
+            # 只显示日期部分 (YYYY-MM-DD)
+            if len(import_val) > 10:
+                import_val = import_val[:10]
+            update_disp = self._pad_disp(self._truncate_disp(import_val, update_w), update_w)
+            
+            contact_val = str(val(a, "contact", "") or "")
+            contact_disp = self._pad_disp(self._truncate_disp(contact_val, contact_w), contact_w)
+            
+            # Colors
+            c_full = Colors.green(full_disp) if is_full == 1 else Colors.pink(full_disp)
+            
+            print(f"{Colors.yellow(aid)}{sep}{Colors.green(aname)}{sep}{c_full}{sep}{Colors.cyan(acount)}{sep}{update_disp}{sep}{contact_disp}")
 
     def complete_authors(self, text, line, begidx, endidx):
+        if text.startswith("--"):
+            opts = ["--set-full", "--set-date", "--set-contact"]
+            return simple_complete(text, opts)
         try:
             authors = self.db.list_authors()
             names = [str(a['name']) for a in authors]
