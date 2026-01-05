@@ -1,0 +1,9 @@
+.DS_Store
+library.db
+._library.db
+library
+__pycache__
+core/__pycache__
+._*
+*.pyc
+
