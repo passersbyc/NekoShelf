@@ -2,6 +2,7 @@ import hashlib
 import os
 import re
 import shlex
+import shutil
 
 from .utils import Colors
 
@@ -706,6 +707,41 @@ class ImportEngine:
             print(Colors.yellow(f"源文件删除失败喵: {fp} ({e})"))
             return False
 
+    def safe_delete_dir(self, directory):
+        try:
+            lib_root = os.path.abspath(str(getattr(self.fm, "library_dir", "")))
+        except Exception:
+            lib_root = ""
+        
+        try:
+            dir_abs = os.path.abspath(directory)
+        except Exception:
+            dir_abs = directory
+            
+        if lib_root:
+            try:
+                # 检查是否为藏书目录或在藏书目录内
+                if dir_abs == lib_root or os.path.commonpath([dir_abs, lib_root]) == lib_root:
+                    print(Colors.yellow(f"文件夹在藏书目录中，跳过删除喵: {directory}"))
+                    return False
+                # 检查藏书目录是否在文件夹内 (防止误删父目录)
+                if os.path.commonpath([dir_abs, lib_root]) == dir_abs:
+                     print(Colors.yellow(f"藏书目录在文件夹内，跳过删除喵: {directory}"))
+                     return False
+            except Exception:
+                pass
+                
+        try:
+            if not os.path.exists(directory):
+                return False
+                
+            shutil.rmtree(directory)
+            print(Colors.green(f"源文件夹已删除喵: {directory}"))
+            return True
+        except Exception as e:
+            print(Colors.yellow(f"源文件夹删除失败喵: {directory} ({e})"))
+            return False
+
     def run(self, arg):
         try:
             cfg = self.get_import_config()
@@ -788,9 +824,10 @@ class ImportEngine:
                     print(Colors.red(f"找不到路径喵: {p}"))
                     failed += 1
                     continue
-
+                
+                is_directory = os.path.isdir(p)
                 p_overrides = overrides
-                if parent_as_series and os.path.isdir(p) and ("series" not in overrides):
+                if parent_as_series and is_directory and ("series" not in overrides):
                     try:
                         parent = os.path.basename(os.path.abspath(p)).strip()
                     except Exception:
@@ -828,6 +865,10 @@ class ImportEngine:
                                 self.safe_delete_source(fp)
                     else:
                         failed += 1
+                
+                # 如果用户在删除提示中选择了 "all"，并且当前处理的是文件夹，则尝试删除整个文件夹
+                if not dry_run and is_directory and ask_choice == "all":
+                    self.safe_delete_dir(p)
 
             if files_total == 0:
                 print(Colors.yellow("没有找到可导入的文件喵~ (支持: txt/pdf/doc/docx/epub)"))
