@@ -139,4 +139,15 @@ class ImportCommandsMixin:
         return self._engine().run(arg)
 
     def complete_import(self, text, line, begidx, endidx):
+        # 1. 如果输入以 - 开头，提示选项
+        if text.startswith("-"):
+            opts = [
+                "--recursive", "--dry-run", 
+                "--delete-source", "--keep-source", "--ask-delete",
+                "--skip-dup", "--import-dup", "--ask-dup",
+                "--title=", "--author=", "--tags="
+            ]
+            return [o for o in opts if o.startswith(text)]
+            
+        # 2. 否则提示路径
         return path_complete(text)
