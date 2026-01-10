@@ -708,6 +708,9 @@ class ImportEngine:
             return False
 
     def safe_delete_dir(self, directory):
+        """
+        安全删除文件夹，确保不会误删藏书目录
+        """
         try:
             lib_root = os.path.abspath(str(getattr(self.fm, "library_dir", "")))
         except Exception:
