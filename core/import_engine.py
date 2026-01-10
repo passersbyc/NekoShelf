@@ -709,7 +709,10 @@ class ImportEngine:
 
     def safe_delete_dir(self, directory):
         """
-        安全删除文件夹，确保不会误删藏书目录
+        安全删除文件夹。
+        
+        会检查文件夹是否包含藏书目录，或者是否在藏书目录内，防止误删。
+        只有当文件夹存在且通过安全检查时才会执行删除。
         """
         try:
             lib_root = os.path.abspath(str(getattr(self.fm, "library_dir", "")))
