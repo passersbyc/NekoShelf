@@ -453,10 +453,17 @@ class PixivPlugin(DownloadPlugin):
         
         title = meta_body.get('title') or f"illust_{iid}"
         title_safe = self._sanitize_filename(f"{title} ({iid})")
-        cbz_path = os.path.join(save_dir, f"{title_safe}.cbz")
         
-        if os.path.exists(cbz_path) and os.path.getsize(cbz_path) > 0:
-            tqdm.write(Colors.green(f"已存在跳过: {title_safe}"))
+        # Determine format (PDF or CBZ)
+        # Default to pdf unless config says otherwise
+        fmt = DOWNLOAD_CONFIG.get("pixiv_format", "pdf").lower()
+        if fmt not in ["cbz", "pdf"]: fmt = "pdf"
+        
+        output_ext = f".{fmt}"
+        output_path = os.path.join(save_dir, f"{title_safe}{output_ext}")
+        
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            tqdm.write(Colors.green(f"已存在跳过: {title_safe}{output_ext}"))
             return True
 
         # 3. Setup Temp Dir
@@ -485,17 +492,18 @@ class PixivPlugin(DownloadPlugin):
             shutil.rmtree(work_dir, ignore_errors=True)
             return False
 
-        # 5. Create CBZ
+        # 5. Create Archive (CBZ or PDF)
         downloaded_images.sort()
         
         # Check if download is complete (simple count check)
-        # Note: pages is from API, tasks is what we tried to download
-        # If downloaded_images < len(tasks), it means some failed.
         if len(downloaded_images) < len(tasks):
             missing = len(tasks) - len(downloaded_images)
-            tqdm.write(Colors.yellow(f"警告: 有 {missing} 张图片下载失败，CBZ 内容不完整！"))
+            tqdm.write(Colors.yellow(f"警告: 有 {missing} 张图片下载失败，文件内容不完整！"))
 
-        success = self._create_cbz(downloaded_images, meta_body, cbz_path, iid)
+        if fmt == "cbz":
+            success = self._create_cbz(downloaded_images, meta_body, output_path, iid)
+        else:
+            success = self._create_pdf(downloaded_images, meta_body, output_path, iid)
         
         shutil.rmtree(work_dir, ignore_errors=True)
         return success
@@ -554,6 +562,46 @@ class PixivPlugin(DownloadPlugin):
             return True
         except Exception as e:
             tqdm.write(Colors.red(f"CBZ 打包失败: {e}"))
+            return False
+
+    def _create_pdf(self, images: List[str], meta: Dict, output_path: str, iid: str) -> bool:
+        if not Image:
+            tqdm.write(Colors.red("PDF 生成失败: 未安装 PIL (Pillow) 库喵！请运行 `pip install Pillow`"))
+            return False
+            
+        try:
+            pil_images = []
+            for img_path in images:
+                try:
+                    img = Image.open(img_path)
+                    # Convert to RGB if necessary (e.g. for PNG with transparency)
+                    if img.mode == 'RGBA':
+                        img = img.convert('RGB')
+                    pil_images.append(img)
+                except Exception:
+                    pass
+            
+            if not pil_images:
+                tqdm.write(Colors.red("PDF 生成失败: 没有有效的图片喵..."))
+                return False
+                
+            # Save PDF
+            pil_images[0].save(
+                output_path, "PDF", resolution=100.0, save_all=True, append_images=pil_images[1:]
+            )
+            
+            # Update PDF timestamp
+            if date_str := (meta.get('createDate') or meta.get('uploadDate')):
+                try:
+                    dt = datetime.fromisoformat(date_str)
+                    ts = dt.timestamp()
+                    os.utime(output_path, (ts, ts))
+                except: pass
+                
+            tqdm.write(Colors.green(f"已生成 PDF: {os.path.basename(output_path)}"))
+            return True
+        except Exception as e:
+            tqdm.write(Colors.red(f"PDF 生成失败: {e}"))
             return False
 
     def _sanitize_filename(self, name: str) -> str:
