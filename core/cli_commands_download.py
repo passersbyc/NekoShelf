@@ -17,8 +17,8 @@ class DownloadCommandsMixin:
         支持站点:
         - Pixiv: 输入作者主页链接 (e.g. https://www.pixiv.net/users/12345)
           * 自动爬取该作者的所有小说和漫画/插画。
-          * 漫画会自动合并为 PDF 格式。
-          * 首次使用会提示输入 Cookie (存储在 core/config.py)。
+          * 漫画会自动合并为 CBZ 格式 (含元数据)。
+          * 首次使用会提示输入 Cookie (建议在 config.py 中配置)。
           * 支持多线程下载、断点重试和进度条显示。
           * 自动按 [作者名/标题.txt] 结构导入书库。
 
