@@ -28,13 +28,13 @@ except ImportError:
 class PixivPlugin(DownloadPlugin):
     BASE_URL = "https://www.pixiv.net"
     HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+        "User-Agent": DOWNLOAD_CONFIG.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"),
         "Referer": "https://www.pixiv.net/",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
-    MAX_RETRIES = 3
-    TIMEOUT = 10
-    MAX_WORKERS = 5
+    MAX_RETRIES = DOWNLOAD_CONFIG.get("max_retries", 3)
+    TIMEOUT = DOWNLOAD_CONFIG.get("timeout", 10)
+    MAX_WORKERS = DOWNLOAD_CONFIG.get("max_workers", 5)
 
     def __init__(self):
         super().__init__()
@@ -46,7 +46,7 @@ class PixivPlugin(DownloadPlugin):
         retries = Retry(
             total=self.MAX_RETRIES, 
             backoff_factor=1, 
-            status_forcelist=[500, 502, 503, 504]
+            status_forcelist=[429, 500, 502, 503, 504]
         )
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -84,8 +84,13 @@ class PixivPlugin(DownloadPlugin):
 
     def _check_cookie_validity(self):
         if not self.cookie: return
+        # Simple check: try to fetch user status. If invalid, it might redirect or return error.
         try:
-            self.session.get(f"{self.BASE_URL}/ajax/user/extra", timeout=5)
+            res = self.session.get(f"{self.BASE_URL}/ajax/user/extra", timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if not data.get('body'):
+                    tqdm.write(Colors.yellow("Cookie 可能已过期 (API 返回空 Body)，建议更新喵~"))
         except Exception:
             pass
 
@@ -187,9 +192,12 @@ class PixivPlugin(DownloadPlugin):
 
     def _parse_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
         if m := re.search(r'novel/series/(\d+)', url): return 'SERIES', m.group(1)
+        if m := re.search(r'novel/show\.php\?id=(\d+)', url): return 'NOVEL_SINGLE', m.group(1)
+        if m := re.search(r'artworks/(\d+)', url): return 'ILLUST_SINGLE', m.group(1)
         if m := re.search(r'users/(\d+)', url):
             uid = m.group(1)
             if 'bookmarks/novels' in url: return 'USER_BOOKMARKS_NOVELS', uid
+            if 'bookmarks/artworks' in url: return 'USER_BOOKMARKS_ILLUSTS', uid
             if 'illustrations' in url: return 'USER_ILLUSTS', uid
             if 'manga' in url: return 'USER_MANGA', uid
             if 'novels' in url: return 'USER_NOVELS', uid
@@ -218,9 +226,36 @@ class PixivPlugin(DownloadPlugin):
                 tqdm.write(Colors.yellow("列表获取失败，尝试通过链式遍历获取作品列表喵..."))
                 works['novels'] = self._crawl_series_by_traversal(first_id)
 
+        elif mode == 'NOVEL_SINGLE':
+            works['novels'] = [pid]
+            # Try to fetch author name from the novel metadata
+            try:
+                data = self._request(f"{self.BASE_URL}/ajax/novel/{pid}")
+                if data and (body := data.get('body')):
+                    author_name = body.get('userName', f"User_{body.get('userId', 'Unknown')}")
+            except:
+                pass
+
+        elif mode == 'ILLUST_SINGLE':
+            works['illusts'] = [pid] # Treat single illust as illust
+            try:
+                data = self._request(f"{self.BASE_URL}/ajax/illust/{pid}")
+                if data and (body := data.get('body')):
+                    author_name = body.get('userName', f"User_{body.get('userId', 'Unknown')}")
+            except:
+                pass
+
         elif mode == 'USER_BOOKMARKS_NOVELS':
             author_name = f"{self._get_user_name(pid)}_Bookmarks"
             works['novels'] = self._get_bookmark_works(pid)
+
+        elif mode == 'USER_BOOKMARKS_ILLUSTS':
+            author_name = f"{self._get_user_name(pid)}_Bookmarks_Artworks"
+            # Bookmarks for illusts are slightly different
+            works['illusts'] = self._fetch_paginated_ids(
+                f"{self.BASE_URL}/ajax/user/{pid}/illusts/bookmarks",
+                lambda b: b.get('works', [])
+            )
             
         else: # User modes
             author_name = self._get_user_name(pid)
@@ -343,16 +378,31 @@ class PixivPlugin(DownloadPlugin):
         )
 
     def _get_user_name(self, user_id: str) -> str:
+        # 1. Try API
         data = self._request(f"{self.BASE_URL}/ajax/user/{user_id}?full=1")
-        return data.get('body', {}).get('name', f"User_{user_id}") if data else f"User_{user_id}"
+        if data and (name := data.get('body', {}).get('name')):
+            return name
+            
+        # 2. Fallback: Scrape HTML
+        tqdm.write(Colors.yellow(f"API 获取用户名失败，尝试解析主页喵..."))
+        res = self._request(f"{self.BASE_URL}/users/{user_id}", json_response=False)
+        if res:
+            if m := re.search(r'<title>(.*?)\s-\s(?:pixiv|插画|漫画).*?</title>', res.text):
+                return m.group(1).strip()
+                
+        return f"User_{user_id}"
 
     def _get_user_works(self, user_id: str) -> Dict[str, List[str]]:
         data = self._request(f"{self.BASE_URL}/ajax/user/{user_id}/profile/all")
         body = data.get('body', {}) if data else {}
+        
+        def _safe_keys(val):
+            return list(val.keys()) if isinstance(val, dict) else []
+
         return {
-            'illusts': list(body.get('illusts', {}).keys()),
-            'manga': list(body.get('manga', {}).keys()),
-            'novels': list(body.get('novels', {}).keys())
+            'illusts': _safe_keys(body.get('illusts')),
+            'manga': _safe_keys(body.get('manga')),
+            'novels': _safe_keys(body.get('novels'))
         }
 
     def _download_novel(self, nid: str, save_dir: str) -> bool:
@@ -376,8 +426,18 @@ class PixivPlugin(DownloadPlugin):
         full_text = f"{header}\n简介:\n{body.get('description', '')}\n\n{content}"
         
         filename = f"{self._sanitize_filename(title)}.txt"
-        with open(os.path.join(save_dir, filename), 'w', encoding='utf-8') as f:
+        file_path = os.path.join(save_dir, filename)
+        with open(file_path, 'w', encoding='utf-8') as f:
             f.write(full_text)
+            
+        # Update file timestamp
+        if date_str := (body.get('createDate') or body.get('uploadDate')):
+            try:
+                dt = datetime.fromisoformat(date_str)
+                ts = dt.timestamp()
+                os.utime(file_path, (ts, ts))
+            except: pass
+            
         return True
 
     def _download_illust(self, iid: str, save_dir: str, temp_root: Optional[str] = None) -> bool:
@@ -427,6 +487,14 @@ class PixivPlugin(DownloadPlugin):
 
         # 5. Create CBZ
         downloaded_images.sort()
+        
+        # Check if download is complete (simple count check)
+        # Note: pages is from API, tasks is what we tried to download
+        # If downloaded_images < len(tasks), it means some failed.
+        if len(downloaded_images) < len(tasks):
+            missing = len(tasks) - len(downloaded_images)
+            tqdm.write(Colors.yellow(f"警告: 有 {missing} 张图片下载失败，CBZ 内容不完整！"))
+
         success = self._create_cbz(downloaded_images, meta_body, cbz_path, iid)
         
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -473,6 +541,14 @@ class PixivPlugin(DownloadPlugin):
                     
                 if hasattr(ET, 'indent'): ET.indent(root, space="  ")
                 zf.writestr("ComicInfo.xml", ET.tostring(root, encoding='utf-8', method='xml'))
+                
+            # Update CBZ timestamp
+            if date_str := (meta.get('createDate') or meta.get('uploadDate')):
+                try:
+                    dt = datetime.fromisoformat(date_str)
+                    ts = dt.timestamp()
+                    os.utime(output_path, (ts, ts))
+                except: pass
                 
             tqdm.write(Colors.green(f"已生成 CBZ: {os.path.basename(output_path)}"))
             return True

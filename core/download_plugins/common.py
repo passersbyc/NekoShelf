@@ -4,6 +4,7 @@ import re
 import urllib.parse
 from .base import DownloadPlugin
 from ..utils import Colors
+from ..config import DOWNLOAD_CONFIG
 
 class CommonPlugin(DownloadPlugin):
     @property
@@ -17,13 +18,13 @@ class CommonPlugin(DownloadPlugin):
         try:
             # Setup headers
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+                'User-Agent': DOWNLOAD_CONFIG.get("user_agent", 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36')
             }
 
             print(Colors.cyan(f"正在请求链接: {url} ..."))
             
             # Stream request
-            with requests.get(url, stream=True, headers=headers, verify=False) as r:
+            with requests.get(url, stream=True, headers=headers, verify=False, timeout=DOWNLOAD_CONFIG.get("timeout", 10)) as r:
                 r.raise_for_status()
                 
                 # Get filename
