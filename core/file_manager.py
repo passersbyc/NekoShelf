@@ -16,15 +16,25 @@ class FileManager:
         if not s:
             return ""
 
-        forbidden = set('<>:"/\\|?*')
+        table = {
+            '/': '／',
+            '\\': '＼',
+            '?': '？',
+            ':': '：',
+            '*': '＊',
+            '"': '＂',
+            '<': '＜',
+            '>': '＞',
+            '|': '｜'
+        }
+        
         out = []
         for ch in s:
-            if ch in forbidden:
+            # Check for control characters
+            if ord(ch) < 32:
                 continue
-            oc = ord(ch)
-            if oc < 32:
-                continue
-            out.append(ch)
+            out.append(table.get(ch, ch))
+            
         return "".join(out).strip()
 
     def _resolve_author_dir(self, safe_author):
@@ -75,6 +85,13 @@ class FileManager:
         dest_filename = f"{safe_title}{extension}"
         dest_path = dest_dir / dest_filename
 
+        # 如果源文件和目标文件一致，直接返回
+        try:
+            if source.resolve() == dest_path.resolve():
+                return str(dest_path), extension.lstrip('.')
+        except Exception:
+            pass
+
         # 如果文件已存在，添加时间戳避免覆盖
         if dest_path.exists():
             timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
@@ -102,6 +119,22 @@ class FileManager:
                 print(f"删除文件失败喵: {e}")
                 return False
         return False
+
+    def clear_library(self):
+        """Clear all files in the library directory."""
+        if not self.library_dir.exists():
+            return True
+            
+        try:
+            for item in self.library_dir.iterdir():
+                if item.is_file():
+                    os.remove(item)
+                elif item.is_dir():
+                    shutil.rmtree(item)
+            return True
+        except Exception as e:
+            print(f"清空书库失败喵: {e}")
+            return False
 
     def move_book_file(self, current_path, new_title, new_author, new_series=""):
         # 1. 计算新的目标路径

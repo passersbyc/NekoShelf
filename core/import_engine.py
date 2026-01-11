@@ -233,31 +233,100 @@ class ImportEngine:
                 continue
         return raw.decode(errors="ignore")
 
-    def infer_author_tags_from_text(self, text):
-        author = ""
-        tags = ""
+    def parse_text_header(self, text):
+        meta = {"author": "", "tags": "", "title": "", "series": ""}
         if not text:
-            return author, tags
+            return meta
+            
         lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
         for ln in lines[:40]:
             low = ln.lower()
-            if not author and (low.startswith("作者") or low.startswith("author")):
+            
+            # Author
+            if not meta["author"] and (low.startswith("作者") or low.startswith("author")):
                 if ":" in ln:
                     _, v = ln.split(":", 1)
-                    author = v.strip().strip("【】[]()（）")
+                    meta["author"] = v.strip().strip("【】[]()（）")
                 elif "：" in ln:
                     _, v = ln.split("：", 1)
-                    author = v.strip().strip("【】[]()（）")
-            if not tags and (low.startswith("标签") or low.startswith("tags")):
+                    meta["author"] = v.strip().strip("【】[]()（）")
+            
+            # Tags
+            if not meta["tags"] and (low.startswith("标签") or low.startswith("tags")):
                 if ":" in ln:
                     _, v = ln.split(":", 1)
-                    tags = v.strip()
+                    meta["tags"] = v.strip()
                 elif "：" in ln:
                     _, v = ln.split("：", 1)
-                    tags = v.strip()
-            if author and tags:
+                    meta["tags"] = v.strip()
+
+            # Title
+            if not meta["title"] and (low.startswith("标题") or low.startswith("title")):
+                if ":" in ln:
+                    _, v = ln.split(":", 1)
+                    meta["title"] = v.strip()
+                elif "：" in ln:
+                    _, v = ln.split("：", 1)
+                    meta["title"] = v.strip()
+
+            # Series
+            if not meta["series"] and (low.startswith("系列") or low.startswith("series")):
+                if ":" in ln:
+                    _, v = ln.split(":", 1)
+                    meta["series"] = v.strip()
+                elif "：" in ln:
+                    _, v = ln.split("：", 1)
+                    meta["series"] = v.strip()
+
+            if all(meta.values()):
                 break
-        return author, tags
+        return meta
+
+    def infer_author_tags_from_text(self, text):
+        # Backward compatibility wrapper
+        m = self.parse_text_header(text)
+        return m["author"], m["tags"]
+
+    def parse_cbz_metadata(self, file_path):
+        """Extract metadata from ComicInfo.xml in CBZ/ZIP file."""
+        import zipfile
+        import xml.etree.ElementTree as ET
+        
+        meta = {"title": "", "author": "", "tags": "", "series": "", "status": None}
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zf:
+                if 'ComicInfo.xml' in zf.namelist():
+                    with zf.open('ComicInfo.xml') as f:
+                        tree = ET.parse(f)
+                        root = tree.getroot()
+                        
+                        # Map ComicInfo fields to our metadata
+                        # Title
+                        title = root.find('Title')
+                        if title is not None and title.text:
+                            meta['title'] = title.text.strip()
+                            
+                        # Author (Writer)
+                        writer = root.find('Writer')
+                        if writer is not None and writer.text:
+                            meta['author'] = writer.text.strip()
+                            
+                        # Series
+                        series = root.find('Series')
+                        if series is not None and series.text:
+                            meta['series'] = series.text.strip()
+                            
+                        # Tags
+                        tags = root.find('Tags')
+                        if tags is not None and tags.text:
+                            meta['tags'] = tags.text.strip()
+                            
+                        # Summary (optional, not used in main meta yet but good to have)
+                        
+        except Exception:
+            pass
+            
+        return meta
 
     def parse_title_series_from_titlepart(self, title_part):
         title_part = (title_part or "").strip()
@@ -277,13 +346,33 @@ class ImportEngine:
 
         if len(parts) < 2:
             m = re.match(r"^\s*(?P<author>.+?)\s*[-－—]\s*(?P<title>.+?)\s*$", stem)
-            if not m:
-                return None
-            author = (m.group("author") or "").strip()
-            title_raw = (m.group("title") or "").strip()
-            title_raw = self.strip_trailing_id(title_raw)
-            title, series = self.parse_title_series_from_titlepart(title_raw)
-            return {"title": title, "series": series, "author": author, "tags": "", "status": None}
+            if m:
+                author = (m.group("author") or "").strip()
+                title_raw = (m.group("title") or "").strip()
+                title_raw = self.strip_trailing_id(title_raw)
+                title, series = self.parse_title_series_from_titlepart(title_raw)
+                return {"title": title, "series": series, "author": author, "tags": "", "status": None}
+            
+            # Check for [Series] Title format
+            series = ""
+            title = stem
+            # Match [Series] Title
+            m_series = re.match(r"^\s*[\[【](?P<series>.+?)[\]】]\s*(?P<title>.+)$", stem)
+            if m_series:
+                series = m_series.group("series").strip()
+                title = m_series.group("title").strip()
+            
+            # Still strip trailing ID from title
+            title = self.strip_trailing_id(title)
+            
+            # Try to infer series if not found (e.g. trailing Part 1)
+            if not series:
+                 t2, s2 = self.parse_title_series_from_titlepart(title)
+                 if s2:
+                     title = t2
+                     series = s2
+
+            return {"title": title, "series": series, "author": "", "tags": "", "status": None}
 
         raw_title = parts[0]
         title, series = self.parse_title_series_from_titlepart(raw_title)
@@ -302,6 +391,16 @@ class ImportEngine:
 
         if len(parts) >= 4:
             status = self.parse_status(parts[3], default=status)
+
+        # Try to read internal metadata for CBZ/ZIP
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in {'.cbz', '.zip'}:
+            cbz_meta = self.parse_cbz_metadata(file_path)
+            # Merge: prefer CBZ metadata if present
+            if cbz_meta['title']: title = cbz_meta['title']
+            if cbz_meta['author']: author = cbz_meta['author']
+            if cbz_meta['series']: series = cbz_meta['series']
+            if cbz_meta['tags']: tags = cbz_meta['tags']
 
         return {"title": title, "series": series, "author": author, "tags": tags, "status": status}
 
@@ -350,20 +449,41 @@ class ImportEngine:
         if status is None:
             status = self.infer_status_from_text(title, default=None)
 
-        if (
-            (not author or author == "佚名")
-            and "author" not in overrides
-            and not meta.get("author")
-            and os.path.splitext(file_path)[1].lower() == ".txt"
-        ):
+        # Try to enrich metadata from text content (header)
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".txt":
             head = self.peek_text_head(file_path)
-            a2, t2 = self.infer_author_tags_from_text(head)
-            if a2:
-                author = a2
-            if (not tags and "tags" not in overrides) and t2:
-                tags = self.normalize_tags(t2)
+            text_meta = self.parse_text_header(head)
+            
+            if "title" not in overrides and text_meta["title"]:
+                title = text_meta["title"]
+                
+            if "author" not in overrides and (not author or author == "佚名") and text_meta["author"]:
+                author = text_meta["author"]
+                
+            if "series" not in overrides and not series and text_meta["series"]:
+                series = text_meta["series"]
+                
+            if "tags" not in overrides and not tags and text_meta["tags"]:
+                tags = self.normalize_tags(text_meta["tags"])
+                
             if status is None and head:
                 status = self.infer_status_from_text(head, default=None)
+        
+        elif ext == ".cbz":
+            cbz_meta = self.parse_cbz_metadata(file_path)
+            
+            if "title" not in overrides and cbz_meta["title"]:
+                title = cbz_meta["title"]
+                
+            if "author" not in overrides and (not author or author == "佚名") and cbz_meta["author"]:
+                author = cbz_meta["author"]
+                
+            if "series" not in overrides and not series and cbz_meta["series"]:
+                series = cbz_meta["series"]
+                
+            if "tags" not in overrides and not tags and cbz_meta["tags"]:
+                tags = self.normalize_tags(cbz_meta["tags"])
 
         try:
             lib_root = os.path.abspath(str(getattr(self.fm, "library_dir", "")))
@@ -564,6 +684,23 @@ class ImportEngine:
                 dry_run = True
                 i += 1
                 continue
+            if token == "--dup-mode":
+                if i + 1 < len(tokens):
+                    dup_mode = tokens[i+1]
+                    i += 2
+                    continue
+                else:
+                    # Handle --dup-mode=skip format if needed, but simple split handles it usually?
+                    # wait, self.tokenize might split it.
+                    # Assuming parse_args style.
+                    pass
+            
+            # Support --dup-mode=value
+            if token.startswith("--dup-mode="):
+                dup_mode = token.split("=", 1)[1]
+                i += 1
+                continue
+
             if token == "--delete-source":
                 delete_mode = "always"
                 i += 1
@@ -598,6 +735,18 @@ class ImportEngine:
             if token == "--no-parent-as-series":
                 parent_as_series = False
                 i += 1
+                continue
+
+            # Handle --key=value syntax for overrides
+            handled_override = False
+            for key in ("title", "author", "tags", "status", "series"):
+                prefix = f"--{key}="
+                if token.startswith(prefix):
+                    overrides[key] = token[len(prefix):]
+                    i += 1
+                    handled_override = True
+                    break
+            if handled_override:
                 continue
 
             if token in {"--title", "--author", "--tags", "--status", "--series"}:

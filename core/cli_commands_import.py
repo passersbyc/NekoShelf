@@ -4,7 +4,7 @@ from .utils import path_complete
 
 
 class ImportCommandsMixin:
-    _IMPORT_EXTS = {".txt", ".pdf", ".doc", ".docx", ".epub"}
+    _IMPORT_EXTS = {".txt", ".pdf", ".doc", ".docx", ".epub", ".cbz", ".zip"}
 
     def _engine(self):
         eng = getattr(self, "_import_engine", None)
@@ -110,7 +110,11 @@ class ImportCommandsMixin:
            例: 战锤世界的ts堕落 1_佚名.docx
         3) 作者 - 作品名 (ID).ext
            例: エリナ - 学习 (26888003).txt
-        4) 任意文件名.ext
+        4) [系列名] 作品名 (ID).ext 或 作品名 (ID).ext
+           例: [日常] 今天的饭 (123).txt
+        5) 智能内容识别 (Text Header)
+           自动读取文件头部的 标题/作者/系列/标签 信息
+        6) 任意文件名.ext
            (自动识别系列/卷号/状态，默认作者: 佚名)
 
         选项:

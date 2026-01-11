@@ -346,6 +346,21 @@ class DatabaseManager:
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def clear_all(self):
+        """Clear all data from the database."""
+        cursor = self.conn.cursor()
+        cursor.execute("BEGIN TRANSACTION")
+        try:
+            cursor.execute("DELETE FROM books")
+            cursor.execute("DELETE FROM authors")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name='books'")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name='authors'")
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            return False
+
     def update_book(self, book_id, **kwargs):
         if not kwargs:
             return False

@@ -148,7 +148,7 @@ class SystemCommandsMixin:
 
         print(f"\n{section('📚 藏书管理')}")
         print(f"  {cmd('import')}  {Colors.yellow('导入书籍')}  {dim('(多种命名格式/文件夹/预览/删源文件)')}")
-        print(f"  {cmd('download')} {Colors.yellow('下载书籍')}  {dim('(从网络链接并自动归档)')}")
+        print(f"  {cmd('download')} {Colors.yellow('下载/爬虫')}  {dim('(支持Pixiv/通用下载/自动归档)')}")
         print(f"  {cmd('export')}   {Colors.yellow('导出书籍')}  {dim('(支持批量/筛选/zip)')}")
         print(f"  {cmd('list')}     {Colors.yellow('列出所有藏书')}")
         print(f"  {cmd('authors')}  {Colors.yellow('列出所有作者')}  {dim('(支持搜索/藏书统计)')}")
@@ -160,6 +160,7 @@ class SystemCommandsMixin:
         print(f"  {cmd('stats')}    {Colors.yellow('查看统计信息')}")
         print(f"  {cmd('clean')}    {Colors.yellow('清理并可同步藏书目录')}  {dim('(补录/纠正路径/删非法)')}")
         print(f"  {cmd('optimize')} {Colors.yellow('优化数据库')}  {dim('(重排ID/填补空缺/压缩体积)')}")
+        print(f"  {cmd('reset')}    {Colors.yellow('重置系统')}  {dim('(清空所有数据/慎用)')}")
         print(f"  {cmd('clear')}    {Colors.yellow('清空屏幕')}  {dim('(焕然一新喵)')}")
         print(f"  {cmd('help')}     {Colors.yellow('显示这个帮助菜单')}")
         print(f"  {cmd('exit')}     {Colors.yellow('退出系统')}")
@@ -262,6 +263,41 @@ class SystemCommandsMixin:
         """清空屏幕: clear"""
         os.system('cls' if os.name == 'nt' else 'clear')
         print(self.intro)
+
+    def do_reset(self, arg):
+        """重置系统 (清空所有数据): reset [--yes]
+        
+        警告: 此操作将删除数据库中的所有书籍记录、作者记录，
+        并清空 Library 目录下的所有文件！无法撤销！
+        """
+        args = arg.split()
+        force = "--yes" in args or "-y" in args
+        
+        print(Colors.red(f"\n{Colors.BOLD}⚠️  危险操作警告 ⚠️{Colors.RESET}"))
+        print(Colors.red("即将清空所有数据，包括："))
+        print(Colors.red("1. 数据库中的所有书籍和作者记录"))
+        print(Colors.red("2. 书库目录下的所有文件 (实体书)"))
+        print(Colors.red("此操作不可恢复！"))
+        
+        if not force:
+            confirm = input(Colors.yellow("\n你确定要这么做吗？请输入 'yes' 确认: ")).strip()
+            if confirm.lower() != "yes":
+                print(Colors.green("操作已取消喵~"))
+                return
+
+        print(Colors.cyan("\n正在重置数据库..."))
+        if self.db.clear_all():
+            print(Colors.green("数据库已清空喵！"))
+        else:
+            print(Colors.red("数据库清空失败喵..."))
+
+        print(Colors.cyan("正在清空书库文件..."))
+        if self.fm.clear_library():
+            print(Colors.green("书库文件已清空喵！"))
+        else:
+            print(Colors.red("书库清空失败喵..."))
+            
+        print(Colors.green("\n✨ 系统已重置为初始状态喵！"))
 
     def do_clean(self, arg="", silent=False):
         """清理无效记录: clean [--sync] [--dry-run] [--yes]

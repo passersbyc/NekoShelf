@@ -23,6 +23,12 @@ IMPORT_CONFIG = {
     },
 }
 
+# 爬虫配置
+DOWNLOAD_CONFIG = {
+    "pixiv_cookie": "first_visit_datetime_pc=2025-04-27%2020%3A14%3A32; p_ab_id=6; p_ab_id_2=4; p_ab_d_id=44120228; yuid_b=IUV3Ypk; privacy_policy_agreement=7; privacy_policy_notification=0; a_type=0; b_type=0; PHPSESSID=105466527_IZXWYkdmtue5ONigEt9t7ZdJ2yEQORG8; c_type=27; login_ever=yes; _ga=GA1.1.260133522.1746558510; _gcl_au=1.1.1159793158.1764791367; _ga_MZ1NL4PHH0=GS2.1.s1766257575$o4$g1$t1766257593$j42$l0$h0; mybestpixiv_active_user=1; _cfuvid=SgBruAFnXkMMvdwkZzk3pVRGMeTGZyatUY1582IMNL8-1767980980824-0.0.1.1-604800000; __cf_bm=DTggwsebJA2lmJohbfOCg4yStBCL85FBXB8OzGcNttU-1768119416-1.0.1.1-axlCD1zwl34uV2kkktguSKFNDchmekdDVZqCppxfpJTPX4G49p56UklAnWqlTfIdJAko1S5ff.LRAJvhNhKdBfCM3.hd76lw3IReqvgjSfHEY5c9xHRrRt07GOht638u; cf_clearance=KDU__tvIS3aDo7FrgDdLhsbCDaj45cS5jUCYDizSLas-1768121057-1.2.1.1-UV6bd8pdcQgh9Do2V6CS1.S45W.rAJOJLXo.u4CDsKB7KtSk.nHtEoBYDoskpeyxy0p0r2.JEI4qjTycYoR5_zYbn1GeMWwSiw5UmWQQtDFFsubMV8O5PRXJE2zOzEHHq4lOF8g4pmgt0Lyq9ZLGm_3xFNCPOxgNx6t3rAjBnzfQ4JgQG731kILhXTPKmeCtx8C1_NBsHI1X.Dp2bThZXclDmqa3cT0.cP_pesXwVDk; _ga_75BBYNYN9J=GS2.1.s1768118403$o264$g1$t1768121119$j59$l0$h0", # Pixiv Cookie
+}
+
+
 UPDATE_CONFIG = {
     # update 命令行为配置：让命令行更简洁，把默认行为放这里统一管理
     # allowed_fields: 允许被 update 修改的字段

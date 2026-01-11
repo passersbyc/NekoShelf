@@ -1,9 +1,9 @@
 import shlex
 import os
-import urllib.request
-import urllib.parse
-
+import tempfile
+import shutil
 from .utils import Colors, simple_complete
+from .download_manager import DownloadManager
 
 
 class DownloadCommandsMixin:
@@ -11,15 +11,26 @@ class DownloadCommandsMixin:
         """下载书籍: download <URL> [--dir=目录] [--series=系列]
 
         功能:
-        从指定 URL 下载书籍 (支持 HTTP/HTTPS)。
+        从指定 URL 下载书籍，或者从支持的网站 (Pixiv) 批量爬取作品。
+        下载完成后，会自动将其导入到书库中，并清理临时文件。
+        
+        支持站点:
+        - Pixiv: 输入作者主页链接 (e.g. https://www.pixiv.net/users/12345)
+          * 自动爬取该作者的所有小说和漫画/插画。
+          * 漫画会自动合并为 PDF 格式。
+          * 首次使用会提示输入 Cookie (存储在 core/config.py)。
+          * 支持多线程下载、断点重试和进度条显示。
+          * 自动按 [作者名/标题.txt] 结构导入书库。
+
+        - 通用下载: 直接下载文件链接。
         
         选项:
-        - --dir: 指定下载目录 (默认: ./downloads)
-        - --series: 指定系列名称 (用于归档)
+        - --dir: 指定临时下载目录 (可选，默认使用系统临时目录)
+        - --series: 指定系列名称 (用于归档，仅对单文件下载有效)
 
         示例:
-        download https://example.com/book.txt
-        download https://example.com/book.epub --dir=~/Books
+        1) download https://www.pixiv.net/users/123456
+        2) download http://example.com/book.pdf --series="我的收藏"
         """
         args = shlex.split(arg or "")
         if not args:
@@ -27,46 +38,87 @@ class DownloadCommandsMixin:
             return
 
         url = args[0]
-        download_dir = "./downloads"
+        user_specified_dir = None
         series_name = None
 
         # 简单的参数解析
         for a in args[1:]:
             if a.startswith("--dir="):
-                download_dir = a.split("=", 1)[1]
+                user_specified_dir = a.split("=", 1)[1]
             elif a.startswith("--series="):
                 series_name = a.split("=", 1)[1]
 
-        if not os.path.exists(download_dir):
-            try:
-                os.makedirs(download_dir)
-            except Exception as e:
-                print(Colors.red(f"无法创建目录: {e}"))
+        manager = DownloadManager()
+
+        # 定义下载和导入的内部逻辑
+        def process_download(target_dir, is_temp=False):
+            success, msg, output_path = manager.download(url, target_dir, series_name=series_name)
+            
+            if not success:
+                print(Colors.red(msg))
                 return
 
-        print(Colors.cyan(f"开始下载: {url} ..."))
-        
-        try:
-            # 尝试从 URL 提取文件名
-            path = urllib.parse.urlparse(url).path
-            filename = os.path.basename(path)
-            if not filename:
-                filename = "downloaded_book.txt"
-                
-            dest_path = os.path.join(download_dir, filename)
-            
-            # 简单的下载实现 (实际项目中可能需要更复杂的下载器)
-            # 这里仅作为演示，不处理复杂的 headers 或 cookies
-            urllib.request.urlretrieve(url, dest_path)
-            
-            print(Colors.green(f"下载成功喵！已保存到: {dest_path}"))
-            
-            # 如果指定了系列，可以在这里做额外处理，例如移动到系列文件夹
-            if series_name:
-                print(Colors.pink(f"标记为系列: {series_name} (需配合 import 命令导入)"))
+            print(Colors.green(msg))
+            if output_path:
+                print(Colors.pink("\n正在自动导入到书库喵..."))
+                if hasattr(self, "do_import"):
+                    quoted_path = shlex.quote(output_path)
+                    author_name = os.path.basename(output_path.rstrip(os.sep))
+                    quoted_author = shlex.quote(author_name)
+                    
+                    # 构造导入命令
+                    # --delete-source: 导入后删除源文件 (如果是临时目录，这一步可以加速清理)
+                    # 添加 --dup-mode=skip 以避免在批量下载时对已存在文件进行询问
+                    cmd = f"{quoted_path} --recursive --no-parent-as-series --author={quoted_author} --dup-mode=skip"
+                    
+                    # 检查是否在 Library 目录内
+                    from .config import LIBRARY_DIR
+                    is_in_library = False
+                    try:
+                        lib_abs = os.path.abspath(LIBRARY_DIR)
+                        out_abs = os.path.abspath(output_path)
+                        if os.path.commonpath([out_abs, lib_abs]) == lib_abs:
+                            is_in_library = True
+                    except:
+                        pass
 
-        except Exception as e:
-            print(Colors.red(f"下载失败了喵... {e}"))
+                    if is_temp and not is_in_library:
+                         cmd += " --delete-source"
+                    elif is_in_library:
+                         cmd += " --keep-source"
+                    
+                    self.do_import(cmd)
+                else:
+                    print(Colors.yellow("无法自动导入: 未找到导入功能喵..."))
+
+        if user_specified_dir:
+            # 用户指定目录，不视为临时目录（不强制删除，除非用户自己加参数，但这里我们只做基本导入）
+            # 既然用户指定了目录，可能希望保留文件？或者只是指定缓存位置。
+            # 既然用户说“不需要downloads文件夹”，默认行为应该是临时。
+            # 如果指定了 --dir，我们就不自动清理目录本身，但可以尝试导入。
+            print(Colors.cyan(f"使用指定目录: {user_specified_dir}"))
+            process_download(user_specified_dir, is_temp=False)
+        else:
+            # 使用临时目录 - 但对于 Pixiv 插件，它会自动使用 LIBRARY_DIR
+            # 所以我们传递一个假的临时目录，或者修改 process_download 逻辑
+            # 由于 DownloadManager.download 会将 target_dir 传递给插件
+            # PixivPlugin 忽略了 output_dir (target_dir) 并使用 config.LIBRARY_DIR
+            # 所以这里传什么其实不重要，但是为了保持兼容性，我们还是创建一个
+            
+            # 修正: 不需要创建实际的临时目录，因为 PixivPlugin 直接写库
+            # 但是 CommonPlugin 仍然需要临时目录
+            # 所以我们还是保留临时目录创建，反正 PixivPlugin 不用它
+            
+            try:
+                # 使用 tempfile 创建临时目录
+                with tempfile.TemporaryDirectory(prefix="neko_dl_") as temp_dir:
+                    print(Colors.pink(f"创建临时空间: {temp_dir}"))
+                    process_download(temp_dir, is_temp=True)
+                # 退出 with 块后，temp_dir 会被自动清理
+                print(Colors.pink("临时文件已清理喵~"))
+            except Exception as e:
+                print(Colors.red(f"下载流程出错: {e}"))
+
 
     def complete_download(self, text, line, begidx, endidx):
         opts = ["--dir=", "--series="]
