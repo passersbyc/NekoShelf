@@ -11,10 +11,7 @@ from .database import DatabaseManager
 from .file_manager import FileManager
 from .utils import Colors
 from .config import DB_FILE, LIBRARY_DIR, VERSION
-from .commands.library import LibraryCommandsMixin
-from .commands.query import QueryCommandsMixin
-from .commands.manage import ManageCommandsMixin
-from .commands.system import SystemCommandsMixin
+from .commands import LibraryCommandsMixin, QueryCommandsMixin, ManageCommandsMixin, SystemCommandsMixin
 
 
 class MoeCLI(

@@ -1,17 +1,31 @@
-from .download import DownloadCommandsMixin
-from .export import ExportCommandsMixin
-from .import_ import ImportCommandsMixin
-from .library import LibraryCommandsMixin
-from .manage import ManageCommandsMixin
-from .query import QueryCommandsMixin
-from .system import SystemCommandsMixin
+import importlib
+import pkgutil
 
-__all__ = [
-    "DownloadCommandsMixin",
-    "ExportCommandsMixin",
-    "ImportCommandsMixin",
-    "LibraryCommandsMixin",
-    "ManageCommandsMixin",
-    "QueryCommandsMixin",
-    "SystemCommandsMixin",
-]
+
+def _iter_command_modules():
+    for m in pkgutil.iter_modules(__path__):
+        name = getattr(m, "name", "")
+        if not name or name.startswith("_"):
+            continue
+        if name == "__init__":
+            continue
+        yield name
+
+
+def _collect_mixins():
+    out = {}
+    for mod_name in _iter_command_modules():
+        mod = importlib.import_module(f"{__name__}.{mod_name}")
+        for k, v in (mod.__dict__ or {}).items():
+            if not k.endswith("CommandsMixin"):
+                continue
+            if not isinstance(v, type):
+                continue
+            out[k] = v
+    return out
+
+
+_MIXINS = _collect_mixins()
+globals().update(_MIXINS)
+
+__all__ = sorted(_MIXINS.keys())

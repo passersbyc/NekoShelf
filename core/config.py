@@ -1,5 +1,5 @@
 # 配置
-VERSION = "1.1"
+VERSION = "1.2"
 LIBRARY_DIR = "library"
 DB_FILE = "library.db"
 
