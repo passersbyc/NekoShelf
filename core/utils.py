@@ -12,6 +12,9 @@ class Colors:
     def pink(text): return f"{Colors.HEADER}{text}{Colors.RESET}"
     
     @staticmethod
+    def blue(text): return f"{Colors.BLUE}{text}{Colors.RESET}"
+    
+    @staticmethod
     def cyan(text): return f"{Colors.CYAN}{text}{Colors.RESET}"
     
     @staticmethod

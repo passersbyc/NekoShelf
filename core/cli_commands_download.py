@@ -8,10 +8,10 @@ from .download_manager import DownloadManager
 
 class DownloadCommandsMixin:
     def do_download(self, arg):
-        """下载书籍: download <URL> [--dir=目录] [--series=系列]
+        """下载书籍: download <URL> [--dir=目录] [--series=系列] [--save-content]
 
         功能:
-        从指定 URL 下载书籍，或者从支持的网站 (Pixiv) 批量爬取作品。
+        从指定 URL 下载书籍，或者从支持的网站 (Pixiv, Kemono) 批量爬取作品。
         下载完成后，会自动将其导入到书库中，并清理临时文件。
         
         支持站点:
@@ -22,15 +22,23 @@ class DownloadCommandsMixin:
           * 支持多线程下载、断点重试和进度条显示。
           * 自动按 [作者名/标题.txt] 结构导入书库。
 
+        - Kemono: 输入作者主页链接 (e.g. https://kemono.su/patreon/user/12345)
+          * 自动爬取该作者的所有帖子。
+          * 优先下载附件 (Attachments)，并打包为 PDF/CBZ。
+          * 默认忽略正文内容和内嵌图片，仅下载附件。
+          * 使用 --save-content 可强制同时保存正文内容 (TXT)。
+
         - 通用下载: 直接下载文件链接。
         
         选项:
         - --dir: 指定临时下载目录 (可选，默认使用系统临时目录)
         - --series: 指定系列名称 (用于归档，仅对单文件下载有效)
-
+        - --save-content: (仅限 Kemono) 在下载附件的同时，强制保存帖子正文内容为 TXT
+        
         示例:
         1) download https://www.pixiv.net/users/123456
-        2) download http://example.com/book.pdf --series="我的收藏"
+        2) download https://kemono.su/patreon/user/12345 --save-content
+        3) download http://example.com/book.pdf --series="我的收藏"
         """
         args = shlex.split(arg or "")
         if not args:
@@ -40,6 +48,7 @@ class DownloadCommandsMixin:
         url = args[0]
         user_specified_dir = None
         series_name = None
+        save_content = False
 
         # 简单的参数解析
         for a in args[1:]:
@@ -47,12 +56,20 @@ class DownloadCommandsMixin:
                 user_specified_dir = a.split("=", 1)[1]
             elif a.startswith("--series="):
                 series_name = a.split("=", 1)[1]
+            elif a == "--save-content":
+                save_content = True
+
+        # 更新配置
+        # from .config import DOWNLOAD_CONFIG
+        # if save_content:
+        #     DOWNLOAD_CONFIG["kemono_save_content"] = True
 
         manager = DownloadManager()
 
         # 定义下载和导入的内部逻辑
         def process_download(target_dir, is_temp=False):
-            success, msg, output_path = manager.download(url, target_dir, series_name=series_name)
+            # 将 save_content 传递给 download 方法
+            success, msg, output_path = manager.download(url, target_dir, series_name=series_name, save_content=save_content)
             
             if not success:
                 print(Colors.red(msg))
@@ -110,17 +127,27 @@ class DownloadCommandsMixin:
             # 所以我们还是保留临时目录创建，反正 PixivPlugin 不用它
             
             try:
-                # 使用 tempfile 创建临时目录
-                with tempfile.TemporaryDirectory(prefix="neko_dl_") as temp_dir:
+                # 使用项目目录下的 temp_downloads 作为临时空间，方便查看和管理
+                project_temp = os.path.join(os.getcwd(), "temp_downloads")
+                os.makedirs(project_temp, exist_ok=True)
+                
+                # 使用 tempfile 在指定目录下创建临时目录
+                with tempfile.TemporaryDirectory(prefix="neko_dl_", dir=project_temp) as temp_dir:
                     print(Colors.pink(f"创建临时空间: {temp_dir}"))
                     process_download(temp_dir, is_temp=True)
                 # 退出 with 块后，temp_dir 会被自动清理
                 print(Colors.pink("临时文件已清理喵~"))
+                
+                # 尝试删除 temp_downloads (如果为空)
+                try:
+                    os.rmdir(project_temp)
+                except OSError:
+                    pass
             except Exception as e:
                 print(Colors.red(f"下载流程出错: {e}"))
 
 
     def complete_download(self, text, line, begidx, endidx):
-        opts = ["--dir=", "--series="]
+        opts = ["--dir=", "--series=", "--save-content"]
         return simple_complete(text, opts)
 

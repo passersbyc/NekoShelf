@@ -1,11 +1,13 @@
 from .download_plugins.base import DownloadPlugin
 from .download_plugins.common import CommonPlugin
 from .download_plugins.pixiv import PixivPlugin
+from .download_plugins.kemono import KemonoPlugin
 
 class DownloadManager:
     def __init__(self):
         self.plugins: list[DownloadPlugin] = [
             PixivPlugin(),
+            KemonoPlugin(),
             CommonPlugin() # CommonPlugin should be the last one as a fallback
         ]
 
