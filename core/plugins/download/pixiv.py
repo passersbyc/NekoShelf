@@ -3,12 +3,10 @@ import re
 import time
 import json
 import shutil
-import zipfile
 import html
-import xml.etree.ElementTree as ET
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, Dict, List, Tuple, Any, Union
+from typing import Optional, Dict, List, Tuple, Any
+from datetime import datetime
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -16,14 +14,9 @@ from urllib3.util.retry import Retry
 from tqdm import tqdm
 
 from .base import DownloadPlugin
-from ..utils import Colors
-from ..config import DOWNLOAD_CONFIG
-
-# Optional PIL support
-try:
-    from PIL import Image
-except ImportError:
-    Image = None
+from .utils import sanitize_filename, set_file_time, create_cbz, create_pdf
+from ...utils import Colors
+from ...config import DOWNLOAD_CONFIG
 
 class PixivPlugin(DownloadPlugin):
     BASE_URL = "https://www.pixiv.net"
@@ -84,7 +77,6 @@ class PixivPlugin(DownloadPlugin):
 
     def _check_cookie_validity(self):
         if not self.cookie: return
-        # Simple check: try to fetch user status. If invalid, it might redirect or return error.
         try:
             res = self.session.get(f"{self.BASE_URL}/ajax/user/extra", timeout=5)
             if res.status_code == 200:
@@ -128,19 +120,16 @@ class PixivPlugin(DownloadPlugin):
         if total_works == 0:
             return True, "没有找到可以下载的作品喵...", None
 
-        # Determine output directory
-        from ..config import LIBRARY_DIR
+        from ...config import LIBRARY_DIR
         base_dir = output_dir if output_dir else LIBRARY_DIR
-        author_dir = os.path.join(base_dir, self._sanitize_filename(author_name))
+        author_dir = os.path.join(base_dir, sanitize_filename(author_name))
         os.makedirs(author_dir, exist_ok=True)
         
         results = {'success': 0, 'fail': 0}
         
-        # Process Novels
         if works['novels']:
             self._process_batch(works['novels'], author_dir, "Novel", self._download_novel_safe, results)
 
-        # Process Illusts/Manga
         illust_manga_ids = works['illusts'] + works['manga']
         if illust_manga_ids:
             self._process_batch(illust_manga_ids, author_dir, "Illust/Manga", 
@@ -161,7 +150,6 @@ class PixivPlugin(DownloadPlugin):
                     pbar.update(1)
 
     def _request(self, url: str, stream: bool = False, json_response: bool = True) -> Any:
-        """Unified request helper with retry."""
         for attempt in range(self.MAX_RETRIES):
             try:
                 res = self.session.get(url, timeout=self.TIMEOUT, stream=stream)
@@ -221,14 +209,12 @@ class PixivPlugin(DownloadPlugin):
                     lambda x: x.get('page', {}).get('seriesContents', []) if isinstance(x, dict) and 'page' in x else x
                 )
             
-            # Traversal fallback
             if not works['novels'] and (first_id := raw_body.get('firstNovelId')):
                 tqdm.write(Colors.yellow("列表获取失败，尝试通过链式遍历获取作品列表喵..."))
                 works['novels'] = self._crawl_series_by_traversal(first_id)
 
         elif mode == 'NOVEL_SINGLE':
             works['novels'] = [pid]
-            # Try to fetch author name from the novel metadata
             try:
                 data = self._request(f"{self.BASE_URL}/ajax/novel/{pid}")
                 if data and (body := data.get('body')):
@@ -237,7 +223,7 @@ class PixivPlugin(DownloadPlugin):
                 pass
 
         elif mode == 'ILLUST_SINGLE':
-            works['illusts'] = [pid] # Treat single illust as illust
+            works['illusts'] = [pid] 
             try:
                 data = self._request(f"{self.BASE_URL}/ajax/illust/{pid}")
                 if data and (body := data.get('body')):
@@ -251,13 +237,12 @@ class PixivPlugin(DownloadPlugin):
 
         elif mode == 'USER_BOOKMARKS_ILLUSTS':
             author_name = f"{self._get_user_name(pid)}_Bookmarks_Artworks"
-            # Bookmarks for illusts are slightly different
             works['illusts'] = self._fetch_paginated_ids(
                 f"{self.BASE_URL}/ajax/user/{pid}/illusts/bookmarks",
                 lambda b: b.get('works', [])
             )
             
-        else: # User modes
+        else:
             author_name = self._get_user_name(pid)
             all_works = self._get_user_works(pid)
             if mode == 'USER_ALL': works = all_works
@@ -294,14 +279,12 @@ class PixivPlugin(DownloadPlugin):
         return ids
 
     def _get_series_metadata(self, series_id: str) -> Dict:
-        # 1. Try AJAX API
         self.session.headers.update({"Referer": f"{self.BASE_URL}/novel/series/{series_id}"})
         data = self._request(f"{self.BASE_URL}/ajax/novel/series/{series_id}")
         
         if data and (body := data.get('body')):
             return {'title': body.get('title'), 'author': body.get('userName'), 'raw_body': body}
         
-        # 2. Fallback: Scrape HTML
         tqdm.write(Colors.yellow("Pixiv API 获取失败 (404/Error)，尝试网页解析模式喵..."))
         res = self._request(f"{self.BASE_URL}/novel/series/{series_id}", json_response=False)
         if res:
@@ -314,12 +297,10 @@ class PixivPlugin(DownloadPlugin):
         title = title_match.group(1).strip() if title_match else f"Series_{series_id}"
         
         ids = []
-        # Method 1: Regex Scraping (Links)
         ids.extend(re.findall(r'/novel/show\.php\?id=(\d+)', html_content))
         if not ids:
             ids.extend(re.findall(r'/novel/(\d+)"', html_content))
         
-        # Method 2: __NEXT_DATA__
         if not ids:
             if next_match := re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.+?)</script>', html_content, re.DOTALL):
                 try:
@@ -329,7 +310,6 @@ class PixivPlugin(DownloadPlugin):
                         ids.extend([str(x['id']) for x in contents if isinstance(x, dict) and 'id' in x])
                 except Exception: pass
         
-        # Method 3: global-data
         if not ids:
             if meta_match := re.search(r'<meta\s+[^>]*name="global-data"\s+[^>]*content="([^"]+)"', html_content):
                 try:
@@ -338,7 +318,7 @@ class PixivPlugin(DownloadPlugin):
                         ids.extend(re.findall(r'"id":\s*"?(\d+)"?', match.group(1)))
                 except Exception: pass
 
-        ids = list(dict.fromkeys(ids)) # Deduplicate
+        ids = list(dict.fromkeys(ids))
         
         if ids:
             tqdm.write(Colors.pink(f"网页解析成功: 找到 {len(ids)} 个作品喵！"))
@@ -378,12 +358,10 @@ class PixivPlugin(DownloadPlugin):
         )
 
     def _get_user_name(self, user_id: str) -> str:
-        # 1. Try API
         data = self._request(f"{self.BASE_URL}/ajax/user/{user_id}?full=1")
         if data and (name := data.get('body', {}).get('name')):
             return name
             
-        # 2. Fallback: Scrape HTML
         tqdm.write(Colors.yellow(f"API 获取用户名失败，尝试解析主页喵..."))
         res = self._request(f"{self.BASE_URL}/users/{user_id}", json_response=False)
         if res:
@@ -417,7 +395,7 @@ class PixivPlugin(DownloadPlugin):
         series_title = (body.get('seriesNavData') or {}).get('title', '')
         
         tags = [t.get('tag') for t in (body.get('tags') or {}).get('tags', []) if t.get('tag')]
-        author_name = body.get('userName', '')
+        author_name = body.get('userName') or "Unknown"
         
         header = f"标题: {title}\n作者: {author_name}\n"
         if tags: header += f"标签: {','.join(tags)}\n"
@@ -425,52 +403,41 @@ class PixivPlugin(DownloadPlugin):
             
         full_text = f"{header}\n简介:\n{body.get('description', '')}\n\n{content}"
         
-        filename = f"{self._sanitize_filename(title)}.txt"
+        base_name = sanitize_filename(f"{author_name} - {title} (pixiv:novel:{nid})")
+        filename = f"{base_name}.txt"
         file_path = os.path.join(save_dir, filename)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(full_text)
             
-        # Update file timestamp
-        if date_str := (body.get('createDate') or body.get('uploadDate')):
-            try:
-                dt = datetime.fromisoformat(date_str)
-                ts = dt.timestamp()
-                os.utime(file_path, (ts, ts))
-            except: pass
-            
+        set_file_time(file_path, body.get('createDate') or body.get('uploadDate'))
         return True
 
     def _download_illust(self, iid: str, save_dir: str, temp_root: Optional[str] = None) -> bool:
-        # 1. Fetch Pages
         data = self._request(f"{self.BASE_URL}/ajax/illust/{iid}/pages")
         if not data: return False
         pages = data.get('body', [])
         if not pages: return False
 
-        # 2. Fetch Metadata
         meta_data = self._request(f"{self.BASE_URL}/ajax/illust/{iid}")
         meta_body = meta_data.get('body', {}) if meta_data else {}
         
         title = meta_body.get('title') or f"illust_{iid}"
-        title_safe = self._sanitize_filename(f"{title} ({iid})")
+        author_name = meta_body.get('userName') or "Unknown"
+        base_name = sanitize_filename(f"{author_name} - {title} (pixiv:illust:{iid})")
         
-        # Determine format (PDF or CBZ)
-        # Default to pdf unless config says otherwise
         fmt = DOWNLOAD_CONFIG.get("pixiv_format", "pdf").lower()
         if fmt not in ["cbz", "pdf"]: fmt = "pdf"
         
         output_ext = f".{fmt}"
-        output_path = os.path.join(save_dir, f"{title_safe}{output_ext}")
+        output_path = os.path.join(save_dir, f"{base_name}{output_ext}")
         
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            tqdm.write(Colors.green(f"已存在跳过: {title_safe}{output_ext}"))
+            tqdm.write(Colors.green(f"已存在跳过: {base_name}{output_ext}"))
             return True
 
-        # 3. Setup Temp Dir
-        work_dir = os.path.join(temp_root or save_dir, f"_temp_{title_safe}")
+        work_dir = os.path.join(temp_root or save_dir, f"_temp_{base_name}")
         os.makedirs(work_dir, exist_ok=True)
         
-        # 4. Download Images
         downloaded_images = []
         with ThreadPoolExecutor(max_workers=5) as executor:
             tasks = []
@@ -492,119 +459,88 @@ class PixivPlugin(DownloadPlugin):
             shutil.rmtree(work_dir, ignore_errors=True)
             return False
 
-        # 5. Create Archive (CBZ or PDF)
         downloaded_images.sort()
         
-        # Check if download is complete (simple count check)
         if len(downloaded_images) < len(tasks):
             missing = len(tasks) - len(downloaded_images)
             tqdm.write(Colors.yellow(f"警告: 有 {missing} 张图片下载失败，文件内容不完整！"))
 
         if fmt == "cbz":
-            success = self._create_cbz(downloaded_images, meta_body, output_path, iid)
+            success = create_cbz(
+                images=downloaded_images,
+                output_path=output_path,
+                title=meta_body.get('title', ''),
+                author=meta_body.get('userName', ''),
+                description=meta_body.get('description', ''),
+                series=(meta_body.get('seriesNavData') or {}).get('title', ''),
+                source_url=f"{self.BASE_URL}/artworks/{iid}",
+                tags=[t.get('tag') for t in (meta_body.get('tags') or {}).get('tags', []) if t.get('tag')],
+                published_time=meta_body.get('createDate') or meta_body.get('uploadDate')
+            )
         else:
-            success = self._create_pdf(downloaded_images, meta_body, output_path, iid)
+            success = create_pdf(
+                images=downloaded_images,
+                output_path=output_path,
+                title=meta_body.get('title', ''),
+                author=meta_body.get('userName', ''),
+                tags=[t.get('tag') for t in (meta_body.get('tags') or {}).get('tags', []) if t.get('tag')],
+                published_time=meta_body.get('createDate') or meta_body.get('uploadDate')
+            )
         
         shutil.rmtree(work_dir, ignore_errors=True)
         return success
 
     def _download_image(self, url: str, save_path: str) -> bool:
-        res = self._request(url, stream=True, json_response=False)
-        if not res: return False
-        
         try:
-            with open(save_path, 'wb') as f:
-                for chunk in res.iter_content(8192):
-                    f.write(chunk)
-            return True
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        except Exception:
+            pass
+
+        existing = 0
+        try:
+            if os.path.exists(save_path):
+                existing = os.path.getsize(save_path)
+        except Exception:
+            existing = 0
+
+        headers = {}
+        if existing > 0:
+            headers["Range"] = f"bytes={existing}-"
+
+        try:
+            res = self.session.get(url, timeout=self.TIMEOUT, stream=True, headers=headers or None)
+        except Exception:
+            res = None
+
+        if not res:
+            return False
+
+        if res.status_code in (416,):
+            try:
+                if existing > 0:
+                    return True
+            except Exception:
+                pass
+            return False
+
+        if existing > 0 and res.status_code != 206:
+            try:
+                os.remove(save_path)
+            except Exception:
+                pass
+            existing = 0
+
+        try:
+            res.raise_for_status()
         except Exception:
             return False
 
-    def _create_cbz(self, images: List[str], meta: Dict, output_path: str, iid: str) -> bool:
+        mode = 'ab' if existing > 0 and res.status_code == 206 else 'wb'
         try:
-            with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_STORED) as zf:
-                for i, img_path in enumerate(images):
-                    ext = os.path.splitext(img_path)[1]
-                    zf.write(img_path, f"{i+1:03d}{ext}")
-                
-                # ComicInfo.xml
-                root = ET.Element("ComicInfo")
-                ET.SubElement(root, "Title").text = meta.get('title', '')
-                ET.SubElement(root, "Series").text = (meta.get('seriesNavData') or {}).get('title', '')
-                ET.SubElement(root, "Summary").text = meta.get('description', '')
-                ET.SubElement(root, "Writer").text = meta.get('userName', '')
-                ET.SubElement(root, "PageCount").text = str(len(images))
-                ET.SubElement(root, "Web").text = f"{self.BASE_URL}/artworks/{iid}"
-                
-                tags = [t.get('tag') for t in (meta.get('tags') or {}).get('tags', []) if t.get('tag')]
-                if tags: ET.SubElement(root, "Tags").text = ",".join(tags).replace(",", "，")
-                
-                if date_str := (meta.get('createDate') or meta.get('uploadDate')):
-                    try:
-                        dt = datetime.fromisoformat(date_str)
-                        ET.SubElement(root, "Year").text = str(dt.year)
-                        ET.SubElement(root, "Month").text = str(dt.month)
-                        ET.SubElement(root, "Day").text = str(dt.day)
-                    except: pass
-                    
-                if hasattr(ET, 'indent'): ET.indent(root, space="  ")
-                zf.writestr("ComicInfo.xml", ET.tostring(root, encoding='utf-8', method='xml'))
-                
-            # Update CBZ timestamp
-            if date_str := (meta.get('createDate') or meta.get('uploadDate')):
-                try:
-                    dt = datetime.fromisoformat(date_str)
-                    ts = dt.timestamp()
-                    os.utime(output_path, (ts, ts))
-                except: pass
-                
-            tqdm.write(Colors.green(f"已生成 CBZ: {os.path.basename(output_path)}"))
+            with open(save_path, mode) as f:
+                for chunk in res.iter_content(8192):
+                    if chunk:
+                        f.write(chunk)
             return True
-        except Exception as e:
-            tqdm.write(Colors.red(f"CBZ 打包失败: {e}"))
+        except Exception:
             return False
-
-    def _create_pdf(self, images: List[str], meta: Dict, output_path: str, iid: str) -> bool:
-        if not Image:
-            tqdm.write(Colors.red("PDF 生成失败: 未安装 PIL (Pillow) 库喵！请运行 `pip install Pillow`"))
-            return False
-            
-        try:
-            pil_images = []
-            for img_path in images:
-                try:
-                    img = Image.open(img_path)
-                    # Convert to RGB if necessary (e.g. for PNG with transparency)
-                    if img.mode == 'RGBA':
-                        img = img.convert('RGB')
-                    pil_images.append(img)
-                except Exception:
-                    pass
-            
-            if not pil_images:
-                tqdm.write(Colors.red("PDF 生成失败: 没有有效的图片喵..."))
-                return False
-                
-            # Save PDF
-            pil_images[0].save(
-                output_path, "PDF", resolution=100.0, save_all=True, append_images=pil_images[1:]
-            )
-            
-            # Update PDF timestamp
-            if date_str := (meta.get('createDate') or meta.get('uploadDate')):
-                try:
-                    dt = datetime.fromisoformat(date_str)
-                    ts = dt.timestamp()
-                    os.utime(output_path, (ts, ts))
-                except: pass
-                
-            tqdm.write(Colors.green(f"已生成 PDF: {os.path.basename(output_path)}"))
-            return True
-        except Exception as e:
-            tqdm.write(Colors.red(f"PDF 生成失败: {e}"))
-            return False
-
-    def _sanitize_filename(self, name: str) -> str:
-        table = {'/': '／', '\\': '＼', '?': '？', ':': '：', '*': '＊', '"': '＂', '<': '＜', '>': '＞', '|': '｜'}
-        cleaned = "".join(table.get(c, c) for c in name)
-        return cleaned[:60].strip()

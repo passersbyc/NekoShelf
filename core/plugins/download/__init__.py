@@ -1,6 +1,6 @@
-from ...download_plugins.base import DownloadPlugin
-from ...download_plugins.common import CommonPlugin
-from ...download_plugins.kemono import KemonoPlugin
-from ...download_plugins.pixiv import PixivPlugin
+from .base import DownloadPlugin
+from .common import CommonPlugin
+from .kemono import KemonoPlugin
+from .pixiv import PixivPlugin
 
 __all__ = ["DownloadPlugin", "CommonPlugin", "KemonoPlugin", "PixivPlugin"]

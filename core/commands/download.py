@@ -1,9 +1,6 @@
 import shlex
-import os
-import tempfile
-import shutil
 from ..utils import Colors, simple_complete
-from ..download_manager import DownloadManager
+from ..download_service import DownloadImportService
 
 
 class DownloadCommandsMixin:
@@ -24,7 +21,7 @@ class DownloadCommandsMixin:
 
         - Kemono: 输入作者主页链接 (e.g. https://kemono.su/patreon/user/12345)
           * 自动爬取该作者的所有帖子。
-          * 文件自动命名为 "Author - Title (ID)" 格式，方便书库精准识别。
+          * 文件自动命名为 "Author - Title (kemono:service:user:post)" 格式，方便精准识别。
           * 默认模式: 仅下载附件 (Attachments, 如 zip/rar/pdf)，忽略正文和内嵌图片。
           * --image 模式: 仅下载内嵌图片并打包为 PDF (默认) 或 CBZ。
           * --txt 模式: 仅下载正文内容保存为 TXT。
@@ -38,6 +35,8 @@ class DownloadCommandsMixin:
         - --save-content: (仅限 Kemono) 在下载附件的同时，强制保存帖子正文内容为 TXT
         - --txt: (仅限 Kemono) 只下载正文内容
         - --image: (仅限 Kemono) 只下载内嵌图片并打包
+        - --dup-mode: 重复处理模式 skip/overwrite/rename/ask/import
+        - --skip-dup/--overwrite-dup/--rename-dup/--ask-dup: 重复处理快捷开关
         
         示例:
         1) download https://www.pixiv.net/users/123456
@@ -54,6 +53,7 @@ class DownloadCommandsMixin:
         series_name = None
         save_content = False
         dl_mode = "attachment" # default, txt, image
+        dup_mode = None
 
         # 简单的参数解析
         for a in args[1:]:
@@ -67,95 +67,69 @@ class DownloadCommandsMixin:
                 dl_mode = "txt"
             elif a == "--image":
                 dl_mode = "image"
+            elif a == "--skip-dup":
+                dup_mode = "skip"
+            elif a == "--overwrite-dup":
+                dup_mode = "overwrite"
+            elif a == "--rename-dup":
+                dup_mode = "rename"
+            elif a == "--ask-dup":
+                dup_mode = "ask"
+            elif a.startswith("--dup-mode="):
+                dup_mode = a.split("=", 1)[1].strip()
+            elif a.startswith("--dup="):
+                dup_mode = a.split("=", 1)[1].strip()
+
+        if not dup_mode:
+            low = str(url or "").lower()
+            if "kemono." in low:
+                dup_mode = "ask"
+            else:
+                dup_mode = "skip"
 
         # 更新配置
         # from .config import DOWNLOAD_CONFIG
         # if save_content:
         #     DOWNLOAD_CONFIG["kemono_save_content"] = True
 
-        manager = DownloadManager()
-
-        # 定义下载和导入的内部逻辑
-        def process_download(target_dir, is_temp=False):
-            # 将 save_content 传递给 download 方法
-            success, msg, output_path = manager.download(url, target_dir, series_name=series_name, save_content=save_content, kemono_dl_mode=dl_mode)
-            
-            if not success:
-                print(Colors.red(msg))
-                return
-
-            print(Colors.green(msg))
-            if output_path:
-                print(Colors.pink("\n正在自动导入到书库喵..."))
-                if hasattr(self, "do_import"):
-                    quoted_path = shlex.quote(output_path)
-                    author_name = os.path.basename(output_path.rstrip(os.sep))
-                    quoted_author = shlex.quote(author_name)
-                    
-                    # 构造导入命令
-                    # --delete-source: 导入后删除源文件 (如果是临时目录，这一步可以加速清理)
-                    # 添加 --dup-mode=skip 以避免在批量下载时对已存在文件进行询问
-                    cmd = f"{quoted_path} --recursive --no-parent-as-series --author={quoted_author} --dup-mode=skip"
-                    
-                    # 检查是否在 Library 目录内
-                    from ..config import LIBRARY_DIR
-                    is_in_library = False
-                    try:
-                        lib_abs = os.path.abspath(LIBRARY_DIR)
-                        out_abs = os.path.abspath(output_path)
-                        if os.path.commonpath([out_abs, lib_abs]) == lib_abs:
-                            is_in_library = True
-                    except:
-                        pass
-
-                    if is_temp and not is_in_library:
-                         cmd += " --delete-source"
-                    elif is_in_library:
-                         cmd += " --keep-source"
-                    
-                    self.do_import(cmd)
-                else:
-                    print(Colors.yellow("无法自动导入: 未找到导入功能喵..."))
-
+        svc = DownloadImportService(self.db, self.fm)
         if user_specified_dir:
-            # 用户指定目录，不视为临时目录（不强制删除，除非用户自己加参数，但这里我们只做基本导入）
-            # 既然用户指定了目录，可能希望保留文件？或者只是指定缓存位置。
-            # 既然用户说“不需要downloads文件夹”，默认行为应该是临时。
-            # 如果指定了 --dir，我们就不自动清理目录本身，但可以尝试导入。
             print(Colors.cyan(f"使用指定目录: {user_specified_dir}"))
-            process_download(user_specified_dir, is_temp=False)
-        else:
-            # 使用临时目录 - 但对于 Pixiv 插件，它会自动使用 LIBRARY_DIR
-            # 所以我们传递一个假的临时目录，或者修改 process_download 逻辑
-            # 由于 DownloadManager.download 会将 target_dir 传递给插件
-            # PixivPlugin 忽略了 output_dir (target_dir) 并使用 config.LIBRARY_DIR
-            # 所以这里传什么其实不重要，但是为了保持兼容性，我们还是创建一个
-            
-            # 修正: 不需要创建实际的临时目录，因为 PixivPlugin 直接写库
-            # 但是 CommonPlugin 仍然需要临时目录
-            # 所以我们还是保留临时目录创建，反正 PixivPlugin 不用它
-            
-            try:
-                # 使用项目目录下的 temp_downloads 作为临时空间，方便查看和管理
-                project_temp = os.path.join(os.getcwd(), "temp_downloads")
-                os.makedirs(project_temp, exist_ok=True)
-                
-                # 使用 tempfile 在指定目录下创建临时目录
-                with tempfile.TemporaryDirectory(prefix="neko_dl_", dir=project_temp) as temp_dir:
-                    print(Colors.pink(f"创建临时空间: {temp_dir}"))
-                    process_download(temp_dir, is_temp=True)
-                # 退出 with 块后，temp_dir 会被自动清理
-                print(Colors.pink("临时文件已清理喵~"))
-                
-                # 尝试删除 temp_downloads (如果为空)
-                try:
-                    os.rmdir(project_temp)
-                except OSError:
-                    pass
-            except Exception as e:
-                print(Colors.red(f"下载流程出错: {e}"))
+
+        try:
+            out = svc.download_and_import(
+                url=url,
+                download_dir=user_specified_dir,
+                series_name=series_name,
+                save_content=save_content,
+                kemono_dl_mode=dl_mode,
+                dry_run=False,
+                dup_mode=dup_mode,
+            )
+        except Exception as e:
+            print(Colors.red(f"下载流程出错: {e}"))
+            return
+
+        if not out.get("success"):
+            print(Colors.red(out.get("message") or "下载失败喵..."))
+            return
+
+        print(Colors.green(out.get("message") or "下载完成喵~"))
+        print(Colors.pink(f"已归档: {out.get('imported', 0)}，跳过重复: {out.get('skipped', 0)}"))
 
 
     def complete_download(self, text, line, begidx, endidx):
-        opts = ["--dir=", "--series=", "--save-content"]
+        opts = [
+            "--dir=",
+            "--series=",
+            "--save-content",
+            "--txt",
+            "--image",
+            "--dup-mode=",
+            "--dup=",
+            "--skip-dup",
+            "--overwrite-dup",
+            "--rename-dup",
+            "--ask-dup",
+        ]
         return simple_complete(text, opts)

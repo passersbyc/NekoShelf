@@ -3,8 +3,10 @@ import os
 import re
 import shlex
 import shutil
+import datetime
 
 from .utils import Colors
+from .utils import get_logger, normalize_title, fullwidth_to_halfwidth
 
 
 class ImportEngine:
@@ -42,6 +44,27 @@ class ImportEngine:
             },
         }
 
+    def _naming_rules(self):
+        try:
+            cfg = dict(self.import_config or {})
+        except Exception:
+            cfg = {}
+        try:
+            rules = dict(cfg.get("naming_rules") or {})
+        except Exception:
+            rules = {}
+        return rules
+
+    def _normalize_title_for_import(self, title: str) -> str:
+        rules = self._naming_rules()
+        if not rules:
+            return (title or "").strip()
+        if not bool(rules.get("title_fullwidth_to_halfwidth", True)):
+            return (title or "").strip()
+        keep_chars = str(rules.get("title_keep_chars", "-_") or "-_")
+        collapse = bool(rules.get("title_collapse_spaces", True))
+        return normalize_title(title or "", keep_chars=keep_chars, collapse_spaces=collapse)
+
     def file_hash(self, file_path, algo="sha256"):
         try:
             h = hashlib.new(algo)
@@ -66,8 +89,14 @@ class ImportEngine:
             return str(p)
 
     def pick_duplicate_action(self, fp, dup_book, ask_choice=None):
-        if ask_choice in {"skip_all", "import_all"}:
-            return (ask_choice == "import_all"), ask_choice
+        if ask_choice in {"skip_all", "import_all", "overwrite_all", "rename_all"}:
+            if ask_choice == "skip_all":
+                return "skip", ask_choice
+            if ask_choice == "import_all":
+                return "import", ask_choice
+            if ask_choice == "rename_all":
+                return "rename", ask_choice
+            return "overwrite", ask_choice
 
         bid = dup_book["id"] if dup_book is not None and "id" in dup_book.keys() else "?"
         title = dup_book["title"] if dup_book is not None and "title" in dup_book.keys() else ""
@@ -76,21 +105,80 @@ class ImportEngine:
         file_path = dup_book["file_path"] if dup_book is not None and "file_path" in dup_book.keys() else ""
         series_info = f" [系列: {Colors.cyan(series)}]" if series else ""
 
-        print(Colors.yellow("发现重复导入候选喵~"))
+        print(Colors.yellow("发现重复书籍喵~"))
         print(
             f"  现有记录: [{Colors.yellow(str(bid))}] {Colors.BOLD}{title}{Colors.RESET} - {Colors.green(author)}{series_info}"
         )
         if file_path:
             print(Colors.cyan(f"  已归档: {file_path}"))
         print(Colors.cyan(f"  本次来源: {fp}"))
-        ans = input(Colors.pink("选择: [s]跳过 [i]仍导入 [a]以后都导入 [n]以后都跳过 > ")).strip().lower()
+        ans_raw = input(
+            Colors.pink(
+                "选择: [回车]/[o]覆盖(默认) [s]跳过 [r]重命名导入 [i]仍导入 | oa/sa/ra/ia=全部采用 > "
+            )
+        ).strip()
+        ans = ans_raw.lower()
+        if ans in {"", "o", "overwrite"}:
+            return "overwrite", ask_choice
+        if ans in {"s", "skip"}:
+            return "skip", ask_choice
+        if ans in {"r", "rename"}:
+            return "rename", ask_choice
         if ans in {"i", "import"}:
-            return True, ask_choice
-        if ans in {"a", "all"}:
-            return True, "import_all"
-        if ans in {"n", "none"}:
-            return False, "skip_all"
-        return False, ask_choice
+            return "import", ask_choice
+        if ans in {"oa", "overwrite_all"}:
+            return "overwrite", "overwrite_all"
+        if ans in {"sa", "skip_all"}:
+            return "skip", "skip_all"
+        if ans in {"ra", "rename_all"}:
+            return "rename", "rename_all"
+        if ans in {"ia", "import_all"}:
+            return "import", "import_all"
+        return "overwrite", ask_choice
+
+    def _make_unique_title(self, title, author, series):
+        base = (title or "").strip() or "未命名"
+        author = (author or "").strip() or "佚名"
+        series = (series or "").strip()
+        cand = base
+        i = 2
+        while True:
+            try:
+                exists = self.db.find_books_by_signature(cand, author, series, limit=1)
+            except Exception:
+                exists = []
+            if not exists:
+                return cand
+            cand = f"{base} ({i})"
+            i += 1
+
+    def _overwrite_existing_book(self, dup_book):
+        if dup_book is None:
+            return False
+        try:
+            bid = dup_book["id"]
+        except Exception:
+            bid = None
+        try:
+            old_path = dup_book["file_path"]
+        except Exception:
+            old_path = ""
+
+        ok_file = True
+        if old_path:
+            try:
+                ok_file = bool(self.fm.delete_file(old_path))
+            except Exception:
+                ok_file = False
+
+        ok_db = True
+        if bid is not None:
+            try:
+                ok_db = bool(self.db.delete_book(int(bid)))
+            except Exception:
+                ok_db = False
+
+        return bool(ok_file and ok_db)
 
     def looks_like_part_suffix(self, suffix):
         s = (suffix or "").strip()
@@ -354,11 +442,23 @@ class ImportEngine:
         
         # We need to be specific to avoid false positives. The (ID) is the key signature of Kemono downloads.
         # Allow ID to be 'None' just in case, and capture the original filename suffix
-        m_kemono = re.match(r"^\s*(?P<author>.+?)\s*-\s*(?P<title>.+?)\s*\((?P<id>\d+|None)\)(?:\s*-\s*(?P<original>.+))?$", stem)
-        if m_kemono:
-             author = m_kemono.group("author").strip()
-             title = m_kemono.group("title").strip()
-             original = m_kemono.group("original")
+        m_src = re.match(r"^\s*(?P<author>.+?)\s*-\s*(?P<title>.+?)\s*[\(（]\s*(?P<id>(?:\d+|None|[^)）]+[:：][^)）]+))\s*[\)）](?:\s*-\s*(?P<original>.+))?$", stem)
+        if m_src:
+             author = m_src.group("author").strip()
+             title = m_src.group("title").strip()
+             original = m_src.group("original")
+             raw_id = (m_src.group("id") or "").strip()
+             raw_id = fullwidth_to_halfwidth(raw_id)
+             source_platform = ""
+             source_work_id = ""
+
+             if ":" in raw_id:
+                 parts = [p for p in raw_id.split(":") if p != ""]
+                 if parts:
+                     source_platform = (parts[0] or "").strip().lower()
+                     source_work_id = ":".join(parts[1:]).strip()
+             elif raw_id.lower() != "none":
+                 source_work_id = raw_id
              
              # If title is "Untitled" and we have an original filename, use that instead
              if title.lower() == "untitled" and original:
@@ -395,7 +495,15 @@ class ImportEngine:
                      title = t2
                      series = s2
 
-             return {"title": title, "series": series, "author": author, "tags": "", "status": None}
+             return {
+                 "title": title,
+                 "series": series,
+                 "author": author,
+                 "tags": "",
+                 "status": None,
+                 "source_platform": source_platform,
+                 "source_work_id": source_work_id,
+             }
 
         parts = stem.split("_")
 
@@ -540,6 +648,11 @@ class ImportEngine:
             if "tags" not in overrides and not tags and cbz_meta["tags"]:
                 tags = self.normalize_tags(cbz_meta["tags"])
 
+        if "title" not in overrides:
+            title2 = self._normalize_title_for_import(title)
+            if title2:
+                title = title2
+
         try:
             lib_root = os.path.abspath(str(getattr(self.fm, "library_dir", "")))
         except Exception:
@@ -582,15 +695,57 @@ class ImportEngine:
 
         dup_book = None
         try:
-            by_path = self.db.find_books_by_file_path(fp_raw, limit=5)
-            if not by_path and fp_norm != fp_raw:
-                by_path = self.db.find_books_by_file_path(fp_norm, limit=5)
-            if not by_path and fp_abs:
-                by_path = self.db.find_books_by_file_path(fp_abs, limit=5)
-            if by_path:
-                dup_book = by_path[0]
+            platform = (
+                overrides.get("source_platform")
+                if overrides and "source_platform" in overrides
+                else meta.get("source_platform")
+            )
+            work_id = (
+                overrides.get("source_work_id")
+                if overrides and "source_work_id" in overrides
+                else meta.get("source_work_id")
+            )
+            platform = "" if platform is None else str(platform).strip().lower()
+            work_id = "" if work_id is None else str(work_id).strip()
+            if platform and work_id:
+                dr = self.db.get_download_record(platform, work_id)
+            else:
+                dr = None
+            if dr is not None:
+                try:
+                    bk_id = dr["book_id"]
+                except Exception:
+                    bk_id = None
+                if bk_id is not None:
+                    try:
+                        dup_book = self.db.get_book(int(bk_id))
+                    except Exception:
+                        dup_book = None
+                if dup_book is None:
+                    try:
+                        dp = dr["file_path"]
+                    except Exception:
+                        dp = ""
+                    if dp:
+                        try:
+                            by_path2 = self.db.find_books_by_file_path(dp, limit=5)
+                        except Exception:
+                            by_path2 = []
+                        if by_path2:
+                            dup_book = by_path2[0]
         except Exception:
-            dup_book = None
+            pass
+        if dup_book is None:
+            try:
+                by_path = self.db.find_books_by_file_path(fp_raw, limit=5)
+                if not by_path and fp_norm != fp_raw:
+                    by_path = self.db.find_books_by_file_path(fp_norm, limit=5)
+                if not by_path and fp_abs:
+                    by_path = self.db.find_books_by_file_path(fp_abs, limit=5)
+                if by_path:
+                    dup_book = by_path[0]
+            except Exception:
+                dup_book = None
 
         if dup_book is None and file_hash:
             try:
@@ -605,41 +760,55 @@ class ImportEngine:
                 cands = self.db.find_books_by_signature(title, author, series, limit=20)
             except Exception:
                 cands = []
-            for b in cands:
-                try:
-                    bh = b["file_hash"] if "file_hash" in b.keys() else ""
-                except Exception:
-                    bh = ""
-                if bh and file_hash and bh == file_hash:
-                    dup_book = b
-                    break
-
-                bp = ""
-                try:
-                    bp = b["file_path"] if "file_path" in b.keys() else ""
-                except Exception:
-                    bp = ""
-                if not bp or not os.path.exists(bp) or not file_hash:
-                    continue
-
-                bp_abs = self.abs_norm(bp)
-                if hash_cache is not None and bp_abs in hash_cache:
-                    bh2 = hash_cache.get(bp_abs) or ""
-                else:
-                    bh2 = self.file_hash(bp_abs)
-                    if hash_cache is not None:
-                        hash_cache[bp_abs] = bh2
-                if bh2 and bh2 == file_hash:
-                    dup_book = b
+            if cands and author and author != "佚名":
+                dup_book = cands[0]
+            else:
+                for b in cands:
                     try:
-                        bid = b["id"] if "id" in b.keys() else None
-                        if bid is not None:
-                            self.db.update_book(int(bid), file_hash=file_hash)
+                        bh = b["file_hash"] if "file_hash" in b.keys() else ""
                     except Exception:
-                        pass
-                    break
+                        bh = ""
+                    if bh and file_hash and bh == file_hash:
+                        dup_book = b
+                        break
 
+                    bp = ""
+                    try:
+                        bp = b["file_path"] if "file_path" in b.keys() else ""
+                    except Exception:
+                        bp = ""
+                    if not bp or not os.path.exists(bp) or not file_hash:
+                        continue
+
+                    bp_abs = self.abs_norm(bp)
+                    if hash_cache is not None and bp_abs in hash_cache:
+                        bh2 = hash_cache.get(bp_abs) or ""
+                    else:
+                        bh2 = self.file_hash(bp_abs)
+                        if hash_cache is not None:
+                            hash_cache[bp_abs] = bh2
+                    if bh2 and bh2 == file_hash:
+                        dup_book = b
+                        try:
+                            bid = b["id"] if "id" in b.keys() else None
+                            if bid is not None:
+                                self.db.update_book(int(bid), file_hash=file_hash)
+                        except Exception:
+                            pass
+                        break
+
+        action = None
         if dup_book is not None:
+            logger = get_logger()
+            try:
+                bid0 = dup_book["id"] if dup_book is not None and "id" in dup_book.keys() else None
+            except Exception:
+                bid0 = None
+            try:
+                logger.info("dedup_detected file=%s existing_book_id=%s dup_mode=%s", file_path, bid0, dup_mode)
+            except Exception:
+                pass
+
             if dry_run:
                 print(Colors.yellow("预览发现重复，默认跳过喵~"))
                 try:
@@ -651,19 +820,91 @@ class ImportEngine:
                 return True, True, dup_choice
 
             if dup_mode == "skip":
+                action = "skip"
+            elif dup_mode in {"overwrite", "rename", "import"}:
+                action = dup_mode
+            elif dup_mode == "ask":
+                action, dup_choice = self.pick_duplicate_action(file_path, dup_book, ask_choice=dup_choice)
+            else:
+                action = "skip"
+
+            if action == "skip":
                 print(Colors.yellow("发现重复导入，已跳过喵~"))
                 try:
                     bid = dup_book["id"]
                     print(Colors.cyan(f"  已存在记录 ID: {bid}"))
                 except Exception:
                     pass
+                try:
+                    platform = (overrides.get("source_platform") if overrides and "source_platform" in overrides else meta.get("source_platform"))
+                    work_id = (overrides.get("source_work_id") if overrides and "source_work_id" in overrides else meta.get("source_work_id"))
+                    downloaded_at = (overrides.get("download_date") if overrides and "download_date" in overrides else None)
+                    source_url = (overrides.get("source_url") if overrides and "source_url" in overrides else "")
+                    platform = "" if platform is None else str(platform).strip().lower()
+                    work_id = "" if work_id is None else str(work_id).strip()
+                    if not downloaded_at:
+                        downloaded_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if platform and work_id:
+                        try:
+                            fp2 = dup_book["file_path"] if dup_book is not None and "file_path" in dup_book.keys() else ""
+                        except Exception:
+                            fp2 = ""
+                        try:
+                            fh2 = dup_book["file_hash"] if dup_book is not None and "file_hash" in dup_book.keys() else ""
+                        except Exception:
+                            fh2 = ""
+                        if not fh2:
+                            fh2 = file_hash
+                        try:
+                            bk_id = dup_book["id"] if dup_book is not None and "id" in dup_book.keys() else None
+                        except Exception:
+                            bk_id = None
+                        if fp2 and fh2 and bk_id is not None:
+                            self.db.upsert_download_record(
+                                platform=platform,
+                                work_id=work_id,
+                                author=(dup_book["author"] if dup_book is not None and "author" in dup_book.keys() else "") or author,
+                                title=(dup_book["title"] if dup_book is not None and "title" in dup_book.keys() else "") or title,
+                                download_date=downloaded_at,
+                                file_path=fp2,
+                                file_hash=fh2,
+                                source_url=source_url,
+                                book_id=int(bk_id),
+                            )
+                except Exception:
+                    pass
+                try:
+                    logger.info("dedup_action action=skip file=%s existing_book_id=%s", file_path, bid0)
+                except Exception:
+                    pass
                 return True, True, dup_choice
 
-            if dup_mode == "ask":
-                do_imp, dup_choice = self.pick_duplicate_action(file_path, dup_book, ask_choice=dup_choice)
-                if not do_imp:
-                    print(Colors.cyan("本次重复已跳过喵~"))
-                    return True, True, dup_choice
+            if action == "overwrite":
+                ok_ov = self._overwrite_existing_book(dup_book)
+                if ok_ov:
+                    print(Colors.cyan("已覆盖旧版本，准备重新归档喵~"))
+                else:
+                    print(Colors.yellow("覆盖旧版本时出现问题，仍尝试继续归档喵..."))
+                try:
+                    logger.info("dedup_action action=overwrite file=%s existing_book_id=%s", file_path, bid0)
+                except Exception:
+                    pass
+
+            if action == "rename":
+                new_title = self._make_unique_title(title, author, series)
+                if new_title != title:
+                    print(Colors.cyan(f"重复书籍将以新标题导入喵: {title} -> {new_title}"))
+                    title = new_title
+                try:
+                    logger.info("dedup_action action=rename file=%s existing_book_id=%s new_title=%s", file_path, bid0, title)
+                except Exception:
+                    pass
+
+            if action == "import":
+                try:
+                    logger.info("dedup_action action=import file=%s existing_book_id=%s", file_path, bid0)
+                except Exception:
+                    pass
 
         if dry_run:
             status_str = "已完结" if status == 1 else "连载中"
@@ -672,12 +913,72 @@ class ImportEngine:
             print(Colors.yellow(f"  源文件: {file_path}"))
             return True, False, dup_choice
 
+        logger = get_logger()
+        try:
+            logger.info("import_start file=%s", file_path)
+        except Exception:
+            pass
+
         print(Colors.cyan(f"正在搬运书籍: {title} (作者: {author})..."))
-        saved_path, file_type = self.fm.import_file(file_path, title, author, series)
-        self.db.add_book(title, author, tags, status, series, saved_path, file_type, file_hash=file_hash)
+        filename_pattern = ""
+        try:
+            filename_pattern = str(self._naming_rules().get("filename_pattern") or "").strip()
+        except Exception:
+            filename_pattern = ""
+        try:
+            saved_path, file_type = self.fm.import_file(file_path, title, author, series, filename_pattern=filename_pattern)
+        except Exception as e:
+            print(Colors.red(f"归档失败喵: {e}"))
+            try:
+                logger.info("import_file_failed file=%s error=%s", file_path, str(e))
+            except Exception:
+                pass
+            return False, False, dup_choice
+
+        book_id = None
+        try:
+            book_id = self.db.add_book(title, author, tags, status, series, saved_path, file_type, file_hash=file_hash)
+        except Exception as e:
+            try:
+                self.fm.delete_file(saved_path)
+            except Exception:
+                pass
+            print(Colors.red(f"写入数据库失败喵: {e}"))
+            try:
+                logger.info("import_db_failed file=%s saved_path=%s error=%s", file_path, saved_path, str(e))
+            except Exception:
+                pass
+            return False, False, dup_choice
+        try:
+            platform = (overrides.get("source_platform") if overrides and "source_platform" in overrides else meta.get("source_platform"))
+            work_id = (overrides.get("source_work_id") if overrides and "source_work_id" in overrides else meta.get("source_work_id"))
+            downloaded_at = (overrides.get("download_date") if overrides and "download_date" in overrides else None)
+            source_url = (overrides.get("source_url") if overrides and "source_url" in overrides else "")
+            platform = "" if platform is None else str(platform).strip().lower()
+            work_id = "" if work_id is None else str(work_id).strip()
+            if not downloaded_at:
+                downloaded_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if platform and work_id and file_hash:
+                self.db.upsert_download_record(
+                    platform=platform,
+                    work_id=work_id,
+                    author=author,
+                    title=title,
+                    download_date=downloaded_at,
+                    file_path=saved_path,
+                    file_hash=file_hash,
+                    source_url=source_url,
+                    book_id=int(book_id) if book_id is not None else None,
+                )
+        except Exception:
+            pass
         status_str = "已完结" if status == 1 else "连载中"
         series_info = f" [系列: {series}]" if series else ""
         print(Colors.green(f"成功归档喵！状态: {status_str}{series_info}, 已存入: {saved_path}"))
+        try:
+            logger.info("import_done file=%s saved_path=%s", file_path, saved_path)
+        except Exception:
+            pass
         return True, False, dup_choice
 
     def iter_import_files(self, path, recursive=False):

@@ -165,7 +165,7 @@ class MoeCLI(
             ("list", "", "列出书架"),
             ("delete", "<选择器>", "删除记录/文件"),
             ("export", "<选择器>", "导出/打包"),
-            ("clean", "[--sync]", "清理并可同步"),
+            ("clean", "[--fix]", "完整性检查与修复"),
         ]
 
         def cell(cmd, args, desc):

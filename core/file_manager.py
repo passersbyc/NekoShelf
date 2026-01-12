@@ -92,7 +92,7 @@ class FileManager:
         except Exception:
             pass
 
-    def import_file(self, source_path, title, author, series=""):
+    def import_file(self, source_path, title, author, series="", filename_pattern: str = ""):
         source = Path(source_path)
         if not source.exists():
             raise FileNotFoundError(f"找不到文件喵: {source_path}")
@@ -114,9 +114,18 @@ class FileManager:
                 if not dest_dir.exists():
                     dest_dir.mkdir(parents=True)
 
-        # 目标文件路径
         extension = source.suffix
-        dest_filename = f"{safe_title}{extension}"
+
+        base_name = safe_title
+        pat = "" if filename_pattern is None else str(filename_pattern).strip()
+        if pat:
+            try:
+                raw_base = pat.format(title=title, author=author, series=series, ext=extension.lstrip("."))
+            except Exception:
+                raw_base = title
+            base_name = self._sanitize_component(raw_base) or safe_title
+
+        dest_filename = f"{base_name}{extension}"
         dest_path = dest_dir / dest_filename
 
         # 如果源文件和目标文件一致，直接返回
@@ -167,7 +176,7 @@ class FileManager:
             print(f"清空书库失败喵: {e}")
             return False
 
-    def move_book_file(self, current_path, new_title, new_author, new_series=""):
+    def move_book_file(self, current_path, new_title, new_author, new_series="", filename_pattern: str = ""):
         # 1. 计算新的目标路径
         safe_author = self._sanitize_component(new_author) or "佚名"
         safe_title = self._sanitize_component(new_title) or "未命名"
@@ -186,7 +195,17 @@ class FileManager:
         
         current = Path(current_path)
         extension = current.suffix
-        new_filename = f"{safe_title}{extension}"
+
+        base_name = safe_title
+        pat = "" if filename_pattern is None else str(filename_pattern).strip()
+        if pat:
+            try:
+                raw_base = pat.format(title=new_title, author=new_author, series=new_series, ext=extension.lstrip("."))
+            except Exception:
+                raw_base = new_title
+            base_name = self._sanitize_component(raw_base) or safe_title
+
+        new_filename = f"{base_name}{extension}"
         new_path = dest_dir / new_filename
         
         # 2. 如果路径没变，直接返回

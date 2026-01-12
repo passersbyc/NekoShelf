@@ -3,9 +3,11 @@ import re
 import difflib
 import shlex
 import shutil
+import datetime
 
+from ..import_engine import ImportEngine
 from ..config import VERSION
-from ..utils import Colors, simple_complete, path_complete
+from ..utils import Colors, simple_complete, path_complete, get_logger
 
 
 class SystemCommandsMixin:
@@ -85,6 +87,12 @@ class SystemCommandsMixin:
                             "选项",
                             "注意",
                             "便捷",
+                            "功能",
+                            "支持站点",
+                            "通用下载",
+                            "默认(安全模式)",
+                            "修复模式",
+                            "范围参数",
                         )
                         if any(stripped.startswith(k) for k in head_keys):
                             if ":" in stripped or "：" in stripped:
@@ -312,6 +320,643 @@ class SystemCommandsMixin:
         print(Colors.green("\n✨ 系统已重置为初始状态喵！"))
 
     def do_clean(self, arg="", silent=False):
+        """数据库完整性检查与修复: clean [--fix] [--yes] [范围]
+
+        默认(安全模式):
+        - 扫描实际文件(以文件为准)，生成差异报告，不做任何修改
+
+        修复模式:
+        - 使用 --fix 显式开启
+        - 自动备份数据库
+        - 使用事务保证原子性
+        - 自动删除多余记录 / 补录缺失记录 / 更新不一致的元数据
+        - 修复后自动复检
+
+        范围参数:
+        - --dir=PATH
+        - --type=pdf
+        - --since=YYYY-MM-DD / --until=YYYY-MM-DD
+        - --resume-from=PATH
+
+        选项:
+        - --fix / --apply
+        - --yes / -y
+        - --dry-run
+        """
+        if silent:
+            return
+
+        def safe_split(s):
+            try:
+                return shlex.split((s or "").strip()) if (s or "").strip() else []
+            except Exception:
+                return str(s or "").split()
+
+        tokens = safe_split(arg)
+        yes = ("--yes" in tokens) or ("-y" in tokens)
+        fix = ("--fix" in tokens) or ("--apply" in tokens) or ("--repair" in tokens)
+
+        dir_filter = ""
+        type_filter = ""
+        since_s = ""
+        until_s = ""
+        resume_from = ""
+        for t in tokens:
+            if t.startswith("--dir="):
+                dir_filter = t.split("=", 1)[1].strip()
+            elif t.startswith("--type="):
+                type_filter = t.split("=", 1)[1].strip().lstrip(".")
+            elif t.startswith("--ext="):
+                type_filter = t.split("=", 1)[1].strip().lstrip(".")
+            elif t.startswith("--since="):
+                since_s = t.split("=", 1)[1].strip()
+            elif t.startswith("--until="):
+                until_s = t.split("=", 1)[1].strip()
+            elif t.startswith("--resume-from="):
+                resume_from = t.split("=", 1)[1].strip()
+
+        logger = get_logger()
+
+        try:
+            lib_root_obj = getattr(self.fm, "library_dir", "library")
+            lib_root = os.path.abspath(str(lib_root_obj))
+        except Exception:
+            lib_root = os.path.abspath("library")
+
+        scope_root = lib_root
+        if dir_filter:
+            try:
+                expanded = os.path.expanduser(os.path.expandvars(dir_filter))
+            except Exception:
+                expanded = dir_filter
+            if not os.path.isabs(expanded):
+                scope_root = os.path.abspath(os.path.join(lib_root, expanded))
+            else:
+                scope_root = os.path.abspath(expanded)
+
+        if not os.path.exists(scope_root):
+            print(Colors.red(f"找不到目录喵: {scope_root}"))
+            return
+
+        supported_exts = set(getattr(self, "_IMPORT_EXTS", {".txt", ".pdf", ".doc", ".docx", ".epub", ".cbz", ".zip"}))
+        supported_exts = {("." + str(e).lstrip(".")) if e else e for e in supported_exts}
+        type_ext = ("." + type_filter.lower().lstrip(".")) if type_filter else ""
+
+        def parse_dt(s, end=False):
+            s = (s or "").strip()
+            if not s:
+                return None
+            try:
+                if len(s) == 10 and "T" not in s and ":" not in s:
+                    d = datetime.datetime.fromisoformat(s)
+                    if end:
+                        d = d + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
+                    return d
+                return datetime.datetime.fromisoformat(s)
+            except Exception:
+                return None
+
+        since_dt = parse_dt(since_s, end=False)
+        until_dt = parse_dt(until_s, end=True)
+        since_ts = since_dt.timestamp() if since_dt else None
+        until_ts = until_dt.timestamp() if until_dt else None
+
+        def abs_norm(p):
+            try:
+                return os.path.normpath(os.path.abspath(str(p)))
+            except Exception:
+                return os.path.normpath(str(p))
+
+        def under_root(root, p):
+            root = abs_norm(root)
+            p = abs_norm(p)
+            try:
+                return os.path.commonpath([root, p]) == root
+            except Exception:
+                return False
+
+        def iter_files(root_path):
+            if os.path.isfile(root_path):
+                yield root_path
+                return
+            for r, _, files2 in os.walk(root_path):
+                for name in files2:
+                    yield os.path.join(r, name)
+
+        eng = ImportEngine(self.db, self.fm, import_exts=supported_exts)
+        hash_cache = {}
+
+        def file_hash(fp):
+            k = abs_norm(fp)
+            if k in hash_cache:
+                return hash_cache[k]
+            h = eng.file_hash(k)
+            hash_cache[k] = h
+            return h
+
+        file_infos = {}
+        file_lookup = {}
+        illegal_files = []
+
+        try:
+            cwd = os.path.abspath(os.getcwd())
+        except Exception:
+            cwd = ""
+
+        scanned = 0
+        for fp in iter_files(scope_root):
+            scanned += 1
+            base = os.path.basename(fp)
+            if base.startswith("."):
+                illegal_files.append(fp)
+                continue
+            ext = os.path.splitext(base)[1].lower()
+            if ext not in supported_exts:
+                illegal_files.append(fp)
+                continue
+            if type_ext and ext != type_ext:
+                continue
+            try:
+                st = os.stat(fp)
+            except PermissionError as e:
+                print(Colors.red(f"权限不足，无法读取文件喵: {fp} ({e})"))
+                continue
+            except OSError as e:
+                print(Colors.red(f"读取文件失败喵: {fp} ({e})"))
+                continue
+
+            mtime = float(st.st_mtime)
+            if since_ts is not None and mtime < since_ts:
+                continue
+            if until_ts is not None and mtime > until_ts:
+                continue
+
+            ap = abs_norm(fp)
+            info = {"path": ap, "size": int(st.st_size), "mtime": float(st.st_mtime), "ext": ext}
+            file_infos[ap] = info
+
+            cands = set()
+            cands.add(ap)
+            cands.add(os.path.normpath(fp))
+            try:
+                if cwd:
+                    rel_cwd = os.path.relpath(ap, cwd)
+                    cands.add(rel_cwd)
+                    cands.add(os.path.normpath(rel_cwd))
+            except Exception:
+                pass
+            for c in cands:
+                if c and c not in file_lookup:
+                    file_lookup[c] = ap
+
+            if scanned % 500 == 0:
+                print(Colors.cyan(f"已扫描 {scanned} 个文件喵..."))
+
+        if resume_from:
+            rf = abs_norm(resume_from)
+            if rf in file_infos:
+                started = False
+                new_infos = {}
+                for k in sorted(file_infos.keys()):
+                    if (not started) and k == rf:
+                        started = True
+                    if started:
+                        new_infos[k] = file_infos[k]
+                file_infos = new_infos
+
+        try:
+            books_all = list(self.db.list_books() or [])
+        except Exception:
+            books_all = []
+
+        books = []
+        for b in books_all:
+            try:
+                fp = b["file_path"]
+            except Exception:
+                fp = ""
+            if not fp:
+                continue
+            ap = abs_norm(fp)
+            if under_root(scope_root, ap):
+                books.append(b)
+
+            if os.path.exists(fp):
+                ap2 = abs_norm(fp)
+                if ap2 not in file_infos:
+                    try:
+                        st = os.stat(fp)
+                        file_infos[ap2] = {"path": ap2, "size": int(st.st_size), "mtime": float(st.st_mtime), "ext": os.path.splitext(fp)[1].lower()}
+                    except Exception:
+                        pass
+                if fp and fp not in file_lookup:
+                    file_lookup[fp] = ap2
+                np2 = os.path.normpath(fp)
+                if np2 and np2 not in file_lookup:
+                    file_lookup[np2] = ap2
+                try:
+                    if cwd:
+                        rel_cwd = os.path.relpath(ap2, cwd)
+                        if rel_cwd not in file_lookup:
+                            file_lookup[rel_cwd] = ap2
+                        rel2 = os.path.normpath(rel_cwd)
+                        if rel2 not in file_lookup:
+                            file_lookup[rel2] = ap2
+                except Exception:
+                    pass
+
+        db_by_file = {}
+        db_by_id = {}
+        for b in books:
+            try:
+                bid = int(b["id"])
+            except Exception:
+                continue
+            db_by_id[bid] = b
+            try:
+                fp = b["file_path"]
+            except Exception:
+                fp = ""
+            if not fp:
+                continue
+            canon = file_lookup.get(fp) or file_lookup.get(os.path.normpath(fp)) or file_lookup.get(abs_norm(fp))
+            if not canon:
+                canon = abs_norm(fp)
+            db_by_file.setdefault(canon, []).append(b)
+
+        missing_files_records = []
+        relink_records = []
+        duplicates_records = []
+        missing_db_records = []
+        meta_mismatches = []
+
+        size_index = {}
+        for ap, info in file_infos.items():
+            size_index.setdefault(int(info.get("size") or 0), []).append(ap)
+
+        for ap, b_list in db_by_file.items():
+            if len(b_list) > 1:
+                ids = []
+                for b in b_list:
+                    try:
+                        ids.append(int(b["id"]))
+                    except Exception:
+                        pass
+                if ids:
+                    duplicates_records.append({"path": ap, "ids": sorted(ids)})
+
+        for bid, b in db_by_id.items():
+            fp = ""
+            try:
+                fp = b["file_path"]
+            except Exception:
+                fp = ""
+            if not fp:
+                continue
+
+            if os.path.exists(fp):
+                canon = file_lookup.get(fp) or file_lookup.get(os.path.normpath(fp)) or file_lookup.get(abs_norm(fp))
+                if not canon:
+                    canon = abs_norm(fp)
+                info = file_infos.get(canon)
+                if not info:
+                    continue
+
+                db_size = None
+                db_mtime = None
+                db_hash = ""
+                try:
+                    if "file_size" in b.keys():
+                        db_size = b["file_size"]
+                except Exception:
+                    db_size = None
+                try:
+                    if "file_mtime" in b.keys():
+                        db_mtime = b["file_mtime"]
+                except Exception:
+                    db_mtime = None
+                try:
+                    db_hash = (b["file_hash"] if "file_hash" in b.keys() else "") or ""
+                except Exception:
+                    db_hash = ""
+
+                need_size = (db_size is None) or (int(db_size) != int(info.get("size") or 0))
+                need_mtime = (db_mtime is None) or (abs(float(db_mtime) - float(info.get("mtime") or 0.0)) > 1.0)
+                need_hash = False
+                new_hash = ""
+                if db_hash:
+                    new_hash = file_hash(canon)
+                    if new_hash and new_hash != db_hash:
+                        need_hash = True
+                else:
+                    new_hash = file_hash(canon)
+                    if new_hash:
+                        need_hash = True
+
+                if need_size or need_mtime or need_hash:
+                    meta_mismatches.append(
+                        {
+                            "id": bid,
+                            "path": canon,
+                            "need_hash": need_hash,
+                            "new_hash": new_hash,
+                            "size": int(info.get("size") or 0),
+                            "mtime": float(info.get("mtime") or 0.0),
+                        }
+                    )
+                continue
+
+            fh = ""
+            try:
+                fh = (b["file_hash"] if "file_hash" in b.keys() else "") or ""
+            except Exception:
+                fh = ""
+            fsz = None
+            try:
+                if "file_size" in b.keys():
+                    fsz = b["file_size"]
+            except Exception:
+                fsz = None
+
+            if fh:
+                candidates = []
+                if fsz is not None:
+                    candidates = list(size_index.get(int(fsz), []))
+                if not candidates:
+                    candidates = list(file_infos.keys())
+                found = ""
+                for cand in candidates[:500]:
+                    if file_hash(cand) == fh:
+                        found = cand
+                        break
+                if found:
+                    relink_records.append({"id": bid, "old": fp, "new": found, "hash": fh})
+                else:
+                    missing_files_records.append({"id": bid, "path": fp})
+            else:
+                missing_files_records.append({"id": bid, "path": fp})
+
+        for ap in sorted(file_infos.keys()):
+            if ap not in db_by_file:
+                missing_db_records.append({"path": ap})
+
+        print(Colors.cyan("\n📦 完整性报告(以实际文件为准)"))
+        print(Colors.cyan(f"  范围: {scope_root}"))
+        if type_ext:
+            print(Colors.cyan(f"  类型: {type_ext.lstrip('.')}"))
+        if since_dt:
+            print(Colors.cyan(f"  起始: {since_dt.strftime('%Y-%m-%d %H:%M:%S')}"))
+        if until_dt:
+            print(Colors.cyan(f"  截止: {until_dt.strftime('%Y-%m-%d %H:%M:%S')}"))
+
+        print(Colors.yellow("\n问题汇总:"))
+        print(f"  - 数据库多余记录(文件缺失): {len(missing_files_records)}")
+        print(f"  - 数据库缺失记录(文件未入库): {len(missing_db_records)}")
+        print(f"  - 可自动纠正路径(靠 hash 找回): {len(relink_records)}")
+        print(f"  - 指向同一文件的重复记录: {len(duplicates_records)}")
+        print(f"  - 元数据不一致(大小/时间/hash): {len(meta_mismatches)}")
+        if illegal_files:
+            print(f"  - 非法/忽略文件: {len(illegal_files)}")
+
+        def show(label, items, fmt):
+            if not items:
+                return
+            print(Colors.yellow(f"\n{label} (展示前 10 条):"))
+            for x in items[:10]:
+                print(fmt(x))
+            if len(items) > 10:
+                print(Colors.cyan(f"  ... 还有 {len(items) - 10} 条"))
+
+        show("数据库多余记录", missing_files_records, lambda x: f"  - [{x['id']}] {x['path']}")
+        show("数据库缺失记录", missing_db_records, lambda x: f"  - {x['path']}")
+        show("可纠正路径", relink_records, lambda x: f"  - [{x['id']}] {x['old']} -> {x['new']}")
+        show("重复记录", duplicates_records, lambda x: f"  - {x['path']}  ids={','.join(str(i) for i in x['ids'])}")
+        show("元数据不一致", meta_mismatches, lambda x: f"  - [{x['id']}] {x['path']}")
+
+        if (not fix) or ("--dry-run" in tokens):
+            if not fix:
+                total_issues = (
+                    len(missing_files_records)
+                    + len(missing_db_records)
+                    + len(relink_records)
+                    + len(duplicates_records)
+                    + len(meta_mismatches)
+                )
+                if total_issues > 0:
+                    print(Colors.cyan("\n建议: clean --fix --yes 进行自动修复喵"))
+                else:
+                    if illegal_files:
+                        print(Colors.green("\n数据库状态完美喵！(虽然有一些未收录的文件/非法文件)"))
+                    else:
+                        print(Colors.green("\n太棒了喵！书库非常完美，没有任何问题喵~"))
+            return
+
+        if not yes:
+            print(Colors.red("\n⚠️  修复模式会修改数据库喵！"))
+            ans = input(Colors.cyan("确认继续吗？请输入 yes: ")).strip().lower()
+            if ans != "yes":
+                print(Colors.green("操作已取消喵。"))
+                return
+
+        db_path = ""
+        try:
+            db_path = str(getattr(self.db, "db_path", "") or "")
+        except Exception:
+            db_path = ""
+        if not db_path:
+            print(Colors.red("找不到数据库路径喵..."))
+            return
+
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = f"{db_path}.bak_{ts}"
+        try:
+            shutil.copy2(db_path, backup_path)
+        except Exception as e:
+            print(Colors.red(f"数据库备份失败喵: {e}"))
+            return
+
+        try:
+            logger.info("clean_backup db=%s backup=%s", db_path, backup_path)
+        except Exception:
+            pass
+
+        conn = getattr(self.db, "conn", None)
+        if conn is None:
+            print(Colors.red("数据库连接不可用喵..."))
+            return
+
+        def infer_from_library_path(ap):
+            author = "佚名"
+            series = ""
+            try:
+                if under_root(lib_root, ap):
+                    rel = os.path.relpath(ap, lib_root)
+                    parts = [p for p in rel.split(os.sep) if p and p not in {".", ".."}]
+                    if len(parts) >= 2:
+                        author = parts[0].strip() or author
+                    if len(parts) >= 3:
+                        series = os.sep.join(parts[1:-1]).strip(os.sep)
+            except Exception:
+                pass
+            return author, series
+
+        try:
+            self.db._suspend_commit = True
+        except Exception:
+            pass
+
+        last_fp = ""
+        try:
+            conn.execute("BEGIN")
+
+            del_dup = 0
+            keep_ids = set()
+            for item in duplicates_records:
+                ids = list(item.get("ids") or [])
+                if ids:
+                    keep_ids.add(max(ids))
+            for item in duplicates_records:
+                ids = list(item.get("ids") or [])
+                if len(ids) <= 1:
+                    continue
+                keep = max(ids)
+                for bid in ids:
+                    if bid == keep:
+                        continue
+                    last_fp = str(item.get("path") or "")
+                    if self.db.delete_book(int(bid)):
+                        del_dup += 1
+                        try:
+                            logger.info("clean_delete_duplicate book_id=%s keep_id=%s", bid, keep)
+                        except Exception:
+                            pass
+
+            del_orphan = 0
+            for item in missing_files_records:
+                bid = int(item["id"])
+                if bid in keep_ids:
+                    continue
+                last_fp = str(item.get("path") or "")
+                if self.db.delete_book(bid):
+                    del_orphan += 1
+                    try:
+                        logger.info("clean_delete_orphan book_id=%s", bid)
+                    except Exception:
+                        pass
+
+            relinked = 0
+            for item in relink_records:
+                bid = int(item["id"])
+                newp = str(item["new"])
+                last_fp = newp
+                if self.db.update_book(bid, file_path=newp):
+                    relinked += 1
+                    try:
+                        logger.info("clean_relink book_id=%s new_path=%s", bid, newp)
+                    except Exception:
+                        pass
+
+            updated_meta = 0
+            for item in meta_mismatches:
+                bid = int(item["id"])
+                fp = str(item["path"])
+                last_fp = fp
+                upd = {"file_size": int(item.get("size") or 0), "file_mtime": float(item.get("mtime") or 0.0)}
+                if item.get("need_hash") and item.get("new_hash"):
+                    upd["file_hash"] = str(item.get("new_hash"))
+                if self.db.update_book(bid, **upd):
+                    updated_meta += 1
+                    try:
+                        logger.info("clean_update_meta book_id=%s path=%s", bid, fp)
+                    except Exception:
+                        pass
+
+            added = 0
+            now_s = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            reserved = set()
+            for item in relink_records:
+                try:
+                    reserved.add(str(item.get("new") or ""))
+                except Exception:
+                    pass
+            for p in list(db_by_file.keys()):
+                try:
+                    if p and os.path.exists(p):
+                        reserved.add(str(p))
+                except Exception:
+                    pass
+            for item in missing_db_records:
+                fp = str(item["path"])
+                if fp in reserved:
+                    continue
+                last_fp = fp
+                meta = eng.parse_metadata_from_filename(fp) or {}
+                title = (meta.get("title") or os.path.splitext(os.path.basename(fp))[0]).strip()
+                author = (meta.get("author") or "").strip()
+                series = (meta.get("series") or "").strip()
+                if not author or author == "佚名":
+                    a2, s2 = infer_from_library_path(fp)
+                    if (not author) or author == "佚名":
+                        author = a2
+                    if not series:
+                        series = s2
+                if not author:
+                    author = "佚名"
+                if not title:
+                    title = "未命名"
+                ext2 = os.path.splitext(fp)[1].lower().lstrip(".")
+                fh2 = file_hash(fp)
+                self.db.add_book(title, author, "", 0, series, fp, ext2, file_hash=fh2, import_date=now_s)
+                added += 1
+                try:
+                    logger.info("clean_add_missing file=%s title=%s author=%s", fp, title, author)
+                except Exception:
+                    pass
+
+            conn.commit()
+            print(Colors.green(f"\n修复完成喵！删除多余记录: {del_orphan}，合并重复: {del_dup}，纠正路径: {relinked}，补录: {added}，更新元数据: {updated_meta}"))
+
+        except KeyboardInterrupt:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(Colors.red("\n操作被中断喵，已回滚本次更改。"))
+            if last_fp:
+                print(Colors.cyan(f"可用 --resume-from={shlex.quote(last_fp)} 继续喵"))
+            try:
+                logger.info("clean_interrupted last=%s", last_fp)
+            except Exception:
+                pass
+            return
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(Colors.red(f"\n修复失败，已回滚喵: {e}"))
+            try:
+                logger.info("clean_failed error=%s", str(e))
+            except Exception:
+                pass
+            return
+
+        finally:
+            try:
+                self.db._suspend_commit = False
+            except Exception:
+                pass
+
+        print(Colors.cyan("\n开始复检喵..."))
+        try:
+            verify_tokens = [x for x in tokens if x not in {"--fix", "--apply", "--repair"}]
+            verify_tokens.append("--dry-run")
+            verify_arg = " ".join(shlex.quote(x) for x in verify_tokens)
+            self.do_clean(verify_arg, silent=False)
+        except Exception:
+            pass
+
+    def do_clean_legacy(self, arg="", silent=False):
         """清理无效记录: clean [--sync] [--dry-run] [--yes]
 
         默认行为(不带参数):
@@ -1057,7 +1702,18 @@ class SystemCommandsMixin:
             print(Colors.red(f"发生错误: {e}"))
 
     def complete_clean(self, text, line, begidx, endidx):
-        opts = ["--sync", "--dry-run", "--yes", "--keep-illegal", "--delete-illegal"]
+        opts = [
+            "--dry-run",
+            "--fix",
+            "--apply",
+            "--yes",
+            "--dir=",
+            "--type=",
+            "--ext=",
+            "--since=",
+            "--until=",
+            "--resume-from=",
+        ]
         return simple_complete(text, opts)
 
     def complete_optimize(self, text, line, begidx, endidx):

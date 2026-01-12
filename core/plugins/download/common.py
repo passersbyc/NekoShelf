@@ -3,8 +3,8 @@ import requests
 import re
 import urllib.parse
 from .base import DownloadPlugin
-from ..utils import Colors
-from ..config import DOWNLOAD_CONFIG
+from ...utils import Colors
+from ...config import DOWNLOAD_CONFIG
 
 class CommonPlugin(DownloadPlugin):
     @property
@@ -23,17 +23,44 @@ class CommonPlugin(DownloadPlugin):
 
             print(Colors.cyan(f"正在请求链接: {url} ..."))
             
-            # Stream request
-            with requests.get(url, stream=True, headers=headers, verify=False, timeout=DOWNLOAD_CONFIG.get("timeout", 10)) as r:
+            filename = self._get_filename(url, {})
+            dest_path = os.path.join(output_dir, filename)
+
+            existing = 0
+            try:
+                if os.path.exists(dest_path):
+                    existing = os.path.getsize(dest_path)
+            except Exception:
+                existing = 0
+
+            if existing > 0:
+                headers["Range"] = f"bytes={existing}-"
+
+            r = requests.get(url, stream=True, headers=headers, verify=False, timeout=DOWNLOAD_CONFIG.get("timeout", 10))
+            try:
+                if existing > 0 and r.status_code in (416,):
+                    return True, f"已存在(断点续传已完成)喵！已保存到: {dest_path}", dest_path
+
+                if existing > 0 and r.status_code != 206:
+                    try:
+                        os.remove(dest_path)
+                    except Exception:
+                        pass
+                    existing = 0
+                    if "Range" in headers:
+                        del headers["Range"]
+                    try:
+                        r.close()
+                    except Exception:
+                        pass
+                    r = requests.get(url, stream=True, headers=headers, verify=False, timeout=DOWNLOAD_CONFIG.get("timeout", 10))
+
                 r.raise_for_status()
-                
-                # Get filename
-                filename = self._get_filename(url, r.headers)
-                dest_path = os.path.join(output_dir, filename)
-                
+
                 total_size = int(r.headers.get('content-length', 0))
-                
-                with open(dest_path, 'wb') as f:
+
+                mode = 'ab' if existing > 0 and r.status_code == 206 else 'wb'
+                with open(dest_path, mode) as f:
                     if total_size == 0:
                         f.write(r.content)
                     else:
@@ -43,7 +70,12 @@ class CommonPlugin(DownloadPlugin):
                                 f.write(chunk)
                                 downloaded += len(chunk)
                                 self._print_progress(downloaded, total_size)
-                print() # Newline
+                print()
+            finally:
+                try:
+                    r.close()
+                except Exception:
+                    pass
 
             return True, f"下载成功喵！已保存到: {dest_path}", dest_path
 

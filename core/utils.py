@@ -1,3 +1,36 @@
+import logging
+import os
+from logging.handlers import RotatingFileHandler
+
+import functools
+
+
+_LOGGER = None
+
+
+def get_logger():
+    global _LOGGER
+    if _LOGGER is not None:
+        return _LOGGER
+
+    logger = logging.getLogger("neko")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        try:
+            log_dir = os.path.join(os.getcwd(), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            fp = os.path.join(log_dir, "neko_shelf.log")
+            h = RotatingFileHandler(fp, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+            fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+        except Exception:
+            pass
+
+    _LOGGER = logger
+    return logger
+
+
 class Colors:
     HEADER = '\033[95m' # Pink/Magenta
     BLUE = '\033[94m'
@@ -25,6 +58,57 @@ class Colors:
     
     @staticmethod
     def red(text): return f"{Colors.RED}{text}{Colors.RESET}"
+
+
+def fullwidth_to_halfwidth(text: str) -> str:
+    s = "" if text is None else str(text)
+    if not s:
+        return ""
+    out = []
+    for ch in s:
+        code = ord(ch)
+        if code == 0x3000:
+            out.append(" ")
+            continue
+        if 0xFF01 <= code <= 0xFF5E:
+            out.append(chr(code - 0xFEE0))
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=4096)
+def normalize_title(text: str, keep_chars: str = "-_", collapse_spaces: bool = True) -> str:
+    s = fullwidth_to_halfwidth(text)
+    s = s.strip()
+    if not s:
+        return ""
+
+    keep = set(keep_chars or "")
+    buf = []
+    last_space = False
+    for ch in s:
+        code = ord(ch)
+        if code < 32:
+            continue
+        if ch.isspace():
+            if collapse_spaces:
+                if last_space:
+                    continue
+                buf.append(" ")
+                last_space = True
+            else:
+                buf.append(ch)
+                last_space = False
+            continue
+        last_space = False
+        if ch in keep or ch.isalnum() or ("\u4e00" <= ch <= "\u9fff"):
+            buf.append(ch)
+            continue
+        buf.append(ch)
+
+    out = "".join(buf).strip()
+    return out
 
 
 def parse_id_ranges(token):
@@ -237,4 +321,3 @@ def path_complete(text):
         pass
         
     return candidates
-

@@ -1,11 +1,14 @@
 import sqlite3
 import datetime
+import os
 from .config import DB_FILE
+from typing import Optional
 
 class DatabaseManager:
     def __init__(self, db_path):
         self.db_path = db_path
         self.conn = None
+        self._suspend_commit = False
         self._connect()
 
     def _connect(self):
@@ -25,6 +28,8 @@ class DatabaseManager:
                 series TEXT,
                 file_path TEXT NOT NULL,
                 file_hash TEXT,
+                file_size INTEGER,
+                file_mtime REAL,
                 file_type TEXT,
                 import_date TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -42,6 +47,12 @@ class DatabaseManager:
 
         if 'file_hash' not in columns:
             cursor.execute("ALTER TABLE books ADD COLUMN file_hash TEXT")
+
+        if 'file_size' not in columns:
+            cursor.execute("ALTER TABLE books ADD COLUMN file_size INTEGER")
+
+        if 'file_mtime' not in columns:
+            cursor.execute("ALTER TABLE books ADD COLUMN file_mtime REAL")
 
         if 'import_date' not in columns:
             # 对于旧数据，将 created_at 作为 import_date (如果有的话)，或者当前时间
@@ -94,7 +105,45 @@ class DatabaseManager:
             WHERE last_import_date IS NULL
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS download_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                work_id TEXT NOT NULL,
+                author TEXT NOT NULL,
+                title TEXT NOT NULL,
+                download_date TIMESTAMP NOT NULL,
+                file_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                source_url TEXT,
+                book_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(platform, work_id)
+            )
+        ''')
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_download_records_platform_work ON download_records(platform, work_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_download_records_file_hash ON download_records(file_hash)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_download_records_book_id ON download_records(book_id)")
+
         self.conn.commit()
+
+    def _commit_if_needed(self):
+        try:
+            if self.conn is None:
+                return
+        except Exception:
+            return
+
+        try:
+            if getattr(self, "_suspend_commit", False):
+                return
+        except Exception:
+            pass
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
 
     def _ensure_author(self, name):
         if not name:
@@ -110,12 +159,23 @@ class DatabaseManager:
         if import_date is None:
             import_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        file_size = None
+        file_mtime = None
+        try:
+            if file_path and os.path.exists(file_path):
+                st = os.stat(file_path)
+                file_size = int(st.st_size)
+                file_mtime = float(st.st_mtime)
+        except Exception:
+            file_size = None
+            file_mtime = None
+
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT INTO books (title, author, tags, status, series, file_path, file_hash, file_type, import_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (title, author, tags, status, series, file_path, file_hash, file_type, import_date))
-        self.conn.commit()
+            INSERT INTO books (title, author, tags, status, series, file_path, file_hash, file_size, file_mtime, file_type, import_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (title, author, tags, status, series, file_path, file_hash, file_size, file_mtime, file_type, import_date))
+        self._commit_if_needed()
         
         # 确保作者存在于 authors 表
         self._ensure_author(author)
@@ -123,6 +183,61 @@ class DatabaseManager:
         self.update_author_import_date(author, import_date)
         
         return cursor.lastrowid
+
+    def upsert_download_record(
+        self,
+        platform: str,
+        work_id: str,
+        author: str,
+        title: str,
+        download_date: str,
+        file_path: str,
+        file_hash: str,
+        source_url: str = "",
+        book_id: Optional[int] = None,
+    ):
+        platform = "" if platform is None else str(platform).strip().lower()
+        work_id = "" if work_id is None else str(work_id).strip()
+        author = "" if author is None else str(author).strip()
+        title = "" if title is None else str(title).strip()
+        download_date = "" if download_date is None else str(download_date).strip()
+        file_path = "" if file_path is None else str(file_path).strip()
+        file_hash = "" if file_hash is None else str(file_hash).strip()
+        source_url = "" if source_url is None else str(source_url).strip()
+
+        if not platform or not work_id or not author or not title or not download_date or not file_path or not file_hash:
+            return False
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO download_records (platform, work_id, author, title, download_date, file_path, file_hash, source_url, book_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, work_id) DO UPDATE SET
+                author=excluded.author,
+                title=excluded.title,
+                download_date=excluded.download_date,
+                file_path=excluded.file_path,
+                file_hash=excluded.file_hash,
+                source_url=excluded.source_url,
+                book_id=excluded.book_id
+            ''',
+            (platform, work_id, author, title, download_date, file_path, file_hash, source_url, book_id),
+        )
+        self._commit_if_needed()
+        return True
+
+    def get_download_record(self, platform: str, work_id: str):
+        platform = "" if platform is None else str(platform).strip().lower()
+        work_id = "" if work_id is None else str(work_id).strip()
+        if not platform or not work_id:
+            return None
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT * FROM download_records WHERE platform = ? AND work_id = ? LIMIT 1',
+            (platform, work_id),
+        )
+        return cursor.fetchone()
 
     def update_author_import_date(self, author_name, import_date):
         if not author_name:
@@ -134,7 +249,7 @@ class DatabaseManager:
             SET last_import_date = ? 
             WHERE name = ? AND (last_import_date IS NULL OR last_import_date < ?)
         ''', (import_date, author_name, import_date))
-        self.conn.commit()
+        self._commit_if_needed()
 
     def find_books_by_file_hash(self, file_hash, limit=20):
         if not file_hash:
@@ -187,7 +302,7 @@ class DatabaseManager:
         
         cursor = self.conn.cursor()
         cursor.execute(f'UPDATE authors SET {columns} WHERE id = ?', values)
-        self.conn.commit()
+        self._commit_if_needed()
         return cursor.rowcount > 0
 
     def get_author(self, author_id):
@@ -343,7 +458,7 @@ class DatabaseManager:
     def delete_book(self, book_id):
         cursor = self.conn.cursor()
         cursor.execute('DELETE FROM books WHERE id = ?', (book_id,))
-        self.conn.commit()
+        self._commit_if_needed()
         return cursor.rowcount > 0
 
     def clear_all(self):
@@ -369,13 +484,25 @@ class DatabaseManager:
         if 'author' in kwargs:
             self._ensure_author(kwargs['author'])
         
+        if "file_path" in kwargs and ("file_size" not in kwargs or "file_mtime" not in kwargs):
+            try:
+                fp = kwargs.get("file_path")
+                if fp and os.path.exists(fp):
+                    st = os.stat(fp)
+                    if "file_size" not in kwargs:
+                        kwargs["file_size"] = int(st.st_size)
+                    if "file_mtime" not in kwargs:
+                        kwargs["file_mtime"] = float(st.st_mtime)
+            except Exception:
+                pass
+
         columns = ", ".join(f"{key} = ?" for key in kwargs.keys())
         values = list(kwargs.values())
         values.append(book_id)
         
         cursor = self.conn.cursor()
         cursor.execute(f'UPDATE books SET {columns} WHERE id = ?', values)
-        self.conn.commit()
+        self._commit_if_needed()
         return cursor.rowcount > 0
 
     def close(self):

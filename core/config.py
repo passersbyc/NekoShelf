@@ -1,5 +1,5 @@
 # 配置
-VERSION = "1.2"
+VERSION = "1.1"
 LIBRARY_DIR = "library"
 DB_FILE = "library.db"
 
@@ -14,6 +14,12 @@ IMPORT_CONFIG = {
     "delete_mode": "ask",  # 导入后是否删除源文件：keep/ask/always
     "dup_mode": "skip",  # 遇到重复记录时如何处理：ask/skip/import
     "parent_as_series_mode": "ask",  # 导入文件夹时文件夹名作为系列名：ask/always/never
+    "naming_rules": {
+        "title_fullwidth_to_halfwidth": True,
+        "title_collapse_spaces": True,
+        "title_keep_chars": "-_",
+        "filename_pattern": "{title}",
+    },
     "defaults": {
         "title": "",  # 默认标题(一般留空，让程序从文件名解析)
         "author": "",  # 默认作者(留空则从文件名/目录/文本头推断，缺失时为“佚名”)
