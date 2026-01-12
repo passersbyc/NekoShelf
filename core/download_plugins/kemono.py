@@ -202,8 +202,8 @@ class KemonoPlugin(DownloadPlugin):
         post_id = post.get("id")
         title = post.get("title", "Untitled") or "Untitled"
         
-        # 统一命名格式: Title (ID)
-        safe_title = self._sanitize_filename(f"{title} ({post_id})")
+        # 统一命名格式: Author - Title (ID)
+        safe_title = self._sanitize_filename(f"{author_name} - {title} ({post_id})")
         
         content = post.get("content", "")
         attachments = post.get("attachments", [])
@@ -336,7 +336,7 @@ class KemonoPlugin(DownloadPlugin):
                     self._create_pdf(final_images, post, output_path, author_name)
             
             # E. 移动非图片文件 (保留原始附件)
-            self._move_other_files(temp_dir, final_images, save_dir)
+            self._move_other_files(temp_dir, final_images, save_dir, safe_title)
                 
         return True
 
@@ -364,7 +364,7 @@ class KemonoPlugin(DownloadPlugin):
                     return True
         return True
 
-    def _move_other_files(self, temp_dir: str, packaged_images: List[str], save_dir: str):
+    def _move_other_files(self, temp_dir: str, packaged_images: List[str], save_dir: str, base_name: str = ""):
         """将未打包的文件移动到目标目录"""
         all_files = []
         for root, _, filenames in os.walk(temp_dir):
@@ -375,7 +375,21 @@ class KemonoPlugin(DownloadPlugin):
         non_image_files = [f for f in all_files if f not in packaged_images]
         
         for src_path in non_image_files:
-            dst_name = os.path.basename(src_path)
+            original_name = os.path.basename(src_path)
+            
+            # 如果提供了 base_name，则重命名为: BaseName - OriginalName
+            # 这样可以避免 "attachment.zip" 这种无意义的文件名污染书库
+            if base_name:
+                # 检查 original_name 是否已经包含了 base_name (避免重复叠加)
+                if base_name in original_name:
+                    dst_name = original_name
+                else:
+                    dst_name = f"{base_name} - {original_name}"
+            else:
+                dst_name = original_name
+                
+            # 再次清理文件名
+            dst_name = self._sanitize_filename(dst_name)
             dst_path = os.path.join(save_dir, dst_name)
             
             # 防止文件名冲突

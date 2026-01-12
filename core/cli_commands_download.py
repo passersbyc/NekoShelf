@@ -24,6 +24,7 @@ class DownloadCommandsMixin:
 
         - Kemono: 输入作者主页链接 (e.g. https://kemono.su/patreon/user/12345)
           * 自动爬取该作者的所有帖子。
+          * 文件自动命名为 "Author - Title (ID)" 格式，方便书库精准识别。
           * 优先下载附件 (Attachments)，并打包为 PDF/CBZ。
           * 默认忽略正文内容和内嵌图片，仅下载附件。
           * 使用 --save-content 可强制同时保存正文内容 (TXT)。

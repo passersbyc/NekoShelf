@@ -342,6 +342,54 @@ class ImportEngine:
     def parse_metadata_from_filename(self, file_path):
         filename = os.path.basename(file_path)
         stem = os.path.splitext(filename)[0]
+
+        # Try to match: Author - Title (ID) - OriginalName
+        # or: Author - Title (ID)
+        # Regex explanation:
+        # ^\s*(?P<author>[^-_]+?)\s*-\s* -> Start with Author followed by " - " (exclude -_ to avoid splitting too early if author has them, but wait, author can have anything. 
+        # Actually, let's just match the first " - " as separator)
+        # (?P<title>.+?)               -> Capture Title (non-greedy)
+        # \s*\(\d+\)                   -> Match (ID) e.g. (12345)
+        # (?:\s*-\s*.+)?$              -> Optional suffix " - anything" (e.g. original filename)
+        
+        # We need to be specific to avoid false positives. The (ID) is the key signature of Kemono downloads.
+        m_kemono = re.match(r"^\s*(?P<author>.+?)\s*-\s*(?P<title>.+?)\s*\(\d+\)(?:\s*-\s*.+)?$", stem)
+        if m_kemono:
+             author = m_kemono.group("author").strip()
+             title = m_kemono.group("title").strip()
+             # Try to parse series from title if possible
+             # Fix: If title contains series like "[Series] Title", parse_title_series_from_titlepart will handle it
+             # But if title is just "Title", it returns "Title", ""
+             # However, parse_title_series_from_titlepart might be too aggressive if the title is "[Work] Sketch" and we expect "Sketch" with series "Work"
+             # Let's verify parse_title_series_from_titlepart logic.
+             # It calls strip_trailing_brackets first.
+             # If title is "[Work] Sketch", strip_trailing_brackets won't touch leading brackets.
+             # infer_series_from_titlepart splits by space and checks last part. 
+             # Wait, parse_title_series_from_titlepart logic:
+             # cleaned, _ = self.strip_trailing_brackets(title_part) -> removes trailing brackets
+             # strip_trailing_id -> removes trailing (ID)
+             # infer_series_from_titlepart -> looks for "Title Part 1" pattern
+             
+             # It seems parse_title_series_from_titlepart DOES NOT handle "[Series] Title" format.
+             # The "[Series] Title" logic is inside parse_metadata_from_filename (lines 379-382 in original file)
+             
+             # So we should replicate that logic here.
+             
+             series = ""
+             # Check for [Series] Title format inside the extracted title
+             m_series = re.match(r"^\s*[\[【](?P<series>.+?)[\]】]\s*(?P<title>.+)$", title)
+             if m_series:
+                 series = m_series.group("series").strip()
+                 title = m_series.group("title").strip()
+             else:
+                 # Fallback to suffix series logic
+                 t2, s2 = self.parse_title_series_from_titlepart(title)
+                 if s2:
+                     title = t2
+                     series = s2
+
+             return {"title": title, "series": series, "author": author, "tags": "", "status": None}
+
         parts = stem.split("_")
 
         if len(parts) < 2:

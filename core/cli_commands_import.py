@@ -108,8 +108,9 @@ class ImportCommandsMixin:
            例: 埃及探秘_佚名_女性化+ts_0.txt
         2) 作品名 卷号_作者_标签_是否完结.ext
            例: 战锤世界的ts堕落 1_佚名.docx
-        3) 作者 - 作品名 (ID).ext
-           例: エリナ - 学习 (26888003).txt
+        3) 作者 - 作品名 (ID).ext (Kemono/Pixiv 下载格式)
+           例: NekoSensei - 练习图 (12345).cbz
+           (精准识别作者、标题和唯一 ID)
         4) [系列名] 作品名 (ID).ext 或 作品名 (ID).ext
            例: [日常] 今天的饭 (123).txt
         5) 智能内容识别 (Text Header)
