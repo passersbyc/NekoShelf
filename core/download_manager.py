@@ -1,7 +1,4 @@
-from .download_plugins.base import DownloadPlugin
-from .download_plugins.common import CommonPlugin
-from .download_plugins.pixiv import PixivPlugin
-from .download_plugins.kemono import KemonoPlugin
+from .plugins.download import DownloadPlugin, CommonPlugin, PixivPlugin, KemonoPlugin
 
 class DownloadManager:
     def __init__(self):

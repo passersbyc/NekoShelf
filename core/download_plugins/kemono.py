@@ -102,8 +102,9 @@ class KemonoPlugin(DownloadPlugin):
         # 确定是否保存内容
         config_save_content = DOWNLOAD_CONFIG.get("kemono_save_content", False)
         should_save_content = kwargs.get("save_content", False) or config_save_content
+        dl_mode = kwargs.get("kemono_dl_mode", "attachment")
         
-        success = self._download_post_safe(post, author_dir, author_name, should_save_content)
+        success = self._download_post_safe(post, author_dir, author_name, should_save_content, dl_mode)
         
         # 清理 temp
         project_temp = os.path.join(os.getcwd(), "temp_downloads")
@@ -151,8 +152,9 @@ class KemonoPlugin(DownloadPlugin):
 
         # 统一使用批量处理逻辑
         # 传递 author_name 用于 metadata
+        dl_mode = kwargs.get("kemono_dl_mode", "attachment")
         self._process_batch(posts, author_dir, "Posts", 
-                          lambda p, d: self._download_post_safe(p, d, author_name, should_save_content), results)
+                          lambda p, d: self._download_post_safe(p, d, author_name, should_save_content, dl_mode), results)
         
         # 尝试删除 temp_downloads (如果为空)
         project_temp = os.path.join(os.getcwd(), "temp_downloads")
@@ -184,22 +186,24 @@ class KemonoPlugin(DownloadPlugin):
                     finally:
                         pbar.update(1)
 
-    def _download_post_safe(self, post: Dict, save_dir: str, author_name: str, save_content: bool = False) -> bool:
+    def _download_post_safe(self, post: Dict, save_dir: str, author_name: str, save_content: bool = False, dl_mode: str = "attachment") -> bool:
         try:
-            return self._download_post(post, save_dir, author_name, save_content)
+            return self._download_post(post, save_dir, author_name, save_content, dl_mode)
         except Exception as e:
             tqdm.write(Colors.red(f"帖子处理失败 ({post.get('id')}): {e}"))
             return False
 
-    def _download_post(self, post: Dict, save_dir: str, author_name: str, save_content: bool = False) -> bool:
+    def _download_post(self, post: Dict, save_dir: str, author_name: str, save_content: bool = False, dl_mode: str = "attachment") -> bool:
         """
         处理单个帖子。
         优化后的逻辑:
         1. 准备元数据和文件名
-        2. 处理小说文本 (如果需要)
-        3. 处理附件 (下载、打包图片、移动其他文件)
+        2. 根据模式 (dl_mode) 处理:
+           - txt: 仅保存小说文本
+           - image: 仅下载内嵌图片并打包
+           - attachment (default): 优先下载附件 (zip/pdf)，忽略内嵌图片
         """
-        post_id = post.get("id")
+        post_id = post.get("id") or "0"
         title = post.get("title", "Untitled") or "Untitled"
         
         # 统一命名格式: Author - Title (ID)
@@ -214,21 +218,66 @@ class KemonoPlugin(DownloadPlugin):
         if file_info: targets.append(file_info)
         if attachments: targets.extend(attachments)
         
+        tqdm.write(Colors.blue(f"初始附件数: {len(targets)}"))
+        
+        # [新增] 解析正文中的图片 (针对内嵌图)
+        if content:
+            tqdm.write(Colors.blue(f"正在解析正文内容 (长度: {len(content)})..."))
+            try:
+                soup = BeautifulSoup(content, 'html.parser')
+                imgs = soup.find_all('img')
+                tqdm.write(Colors.blue(f"正文中发现 {len(imgs)} 个 img 标签"))
+                
+                for img in imgs:
+                    src = img.get('src')
+                    if not src: continue
+                    
+                    # 处理相对路径
+                    if src.startswith('/'):
+                        src = f"{self.BASE_URL}{src}"
+                        
+                    # 避免重复添加
+                    if any(t.get('path') == src for t in targets):
+                        continue
+                        
+                    fname = os.path.basename(src.split('?')[0])
+                    targets.append({
+                        "path": src,
+                        "name": fname
+                    })
+            except Exception as e:
+                tqdm.write(Colors.red(f"正文解析失败: {e}"))
+        
         has_attachments = len(targets) > 0
         
-        # 1. 判定是否保存小说文本
-        # 条件: (纯文本模式) 或 (附件模式且强制保存内容)
-        if (not has_attachments and content) or (has_attachments and content and save_content):
+        # --- Mode: TXT ---
+        if dl_mode == "txt":
+            if content:
+                 self._save_novel(post, save_dir, safe_title, author_name)
+            return True
+
+        # --- Mode: Image ---
+        if dl_mode == "image":
+            if has_attachments:
+                return self._process_attachments(post, targets, save_dir, safe_title, author_name, dl_mode="image")
+            return True
+
+        # --- Mode: Attachment (Default) ---
+        # 默认忽略正文内容和内嵌图片，仅下载附件。
+        # 使用 --save-content 可强制同时保存正文内容。
+        
+        # 1. 判定是否保存小说文本 (仅当 save_content 为 True 时)
+        if content and save_content:
             novel_title = f"{safe_title}_content" if has_attachments else safe_title
             self._save_novel(post, save_dir, novel_title, author_name)
         
-        # 2. 处理附件 (如果有)
+        # 2. 处理附件
         if has_attachments:
-            return self._process_attachments(post, targets, save_dir, safe_title, author_name)
+            return self._process_attachments(post, targets, save_dir, safe_title, author_name, dl_mode="attachment")
             
         return True
 
-    def _process_attachments(self, post: Dict, targets: List[Dict], save_dir: str, safe_title: str, author_name: str) -> bool:
+    def _process_attachments(self, post: Dict, targets: List[Dict], save_dir: str, safe_title: str, author_name: str, dl_mode: str = "attachment") -> bool:
         """下载并处理帖子的所有附件"""
         # 确定打包格式
         fmt = DOWNLOAD_CONFIG.get("kemono_format", "pdf").lower() 
@@ -241,10 +290,8 @@ class KemonoPlugin(DownloadPlugin):
         packed_exists = os.path.exists(output_path) and os.path.getsize(output_path) > 0
         
         # 2. 检查 PDF/CBZ 是否存在 (在书库目录)
-        # 即使我们在下载到临时目录，如果书库里已经有了，也应该跳过
         if not packed_exists:
             from ..config import LIBRARY_DIR
-            # 注意: 这里假设书库结构也是 Library/AuthorName/
             lib_author_dir = os.path.join(LIBRARY_DIR, self._sanitize_filename(author_name))
             lib_output_path = os.path.join(lib_author_dir, f"{safe_title}{output_ext}")
             if os.path.exists(lib_output_path) and os.path.getsize(lib_output_path) > 0:
@@ -254,63 +301,57 @@ class KemonoPlugin(DownloadPlugin):
         # 3. 筛选需要下载的文件
         files_to_download = []
         
-        # 优先下载逻辑:
-        # 如果存在高优先级的附件 (压缩包、文档、视频等)，则忽略页面上的图片列表
-        # 避免出现 "Title.pdf" (附件) 和 "Title (ID).pdf" (生成的) 重复的情况
-        priority_exts = {
-            '.zip', '.rar', '.7z', '.tar', '.gz', '.xz', 
-            '.pdf', '.epub', '.cbz', '.cbr', 
-            '.iso', '.dmg', 
-            '.mp4', '.mkv', '.mov', '.avi', '.wmv', '.webm', 
-            '.psd', '.clip', '.sai', '.sai2', '.kra'
-        }
-        
-        has_priority_attachment = False
-        for t in targets:
-            url = t.get("path", "")
-            if not url: continue
-            fname = t.get("name") or os.path.basename(url)
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in priority_exts:
-                has_priority_attachment = True
-                break
-        
-        if has_priority_attachment:
-            tqdm.write(Colors.yellow(f"发现高优先级附件，将跳过页面图片下载，优先保留原始文件喵~"))
-
         for t in targets:
             # 预判文件名和类型
             url = t.get("path", "")
             if not url: continue
             
-            fname = t.get("name") or os.path.basename(url)
-            ext = os.path.splitext(fname)[1]
-            if not ext and not fname: ext = ".jpg"
+            # 优化文件名提取逻辑
+            # 1. 优先使用 name
+            # 2. 如果 name 不存在或无后缀，参考 URL (去除 query 参数)
+            fname = t.get("name")
+            url_clean = url.split('?')[0]
             
-            is_image = ext.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+            if not fname:
+                fname = os.path.basename(url_clean)
+                
+            ext = os.path.splitext(fname)[1].lower()
             
-            if is_image:
-                # 如果有高优先级附件，跳过图片
-                if has_priority_attachment:
-                    continue
-                # 如果压缩包已存在，跳过图片下载
-                if packed_exists:
-                    continue
-                files_to_download.append(t)
-            else:
-                # 非图片文件，检查是否存在
+            # 如果还没后缀，尝试从 URL 获取
+            if not ext:
+                ext = os.path.splitext(os.path.basename(url_clean))[1].lower()
+                
+            # 最后的兜底
+            if not ext: ext = ".jpg"
+            
+            is_image = ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+            
+            # 根据模式过滤
+            if dl_mode == "attachment":
+                # 默认模式: 仅下载非图片附件 (zip, mp4, etc.)
+                if is_image: continue
+            elif dl_mode == "image":
+                # 图片模式: 仅下载图片
+                if not is_image: continue
+            
+            # 检查文件是否已存在 (对于非图片附件)
+            # 图片因为会被重命名打包，所以这里不方便检查，统一交给 download_images 处理
+            if not is_image:
                 safe_name = self._sanitize_filename(fname)
                 if not safe_name: safe_name = f"attachment_{ext}"
-                
                 dest_path = os.path.join(save_dir, safe_name)
-                # 如果文件存在且大小大于0，跳过
                 if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
                     continue
-                files_to_download.append(t)
+                    
+            files_to_download.append(t)
         
         # 如果没有任何文件需要下载，直接返回
         if not files_to_download:
+            if dl_mode == "image":
+                 tqdm.write(Colors.yellow(f"警告: 在 Image 模式下未找到任何图片文件喵 (共扫描 {len(targets)} 个目标)~"))
             return True
+
+        tqdm.write(Colors.blue(f"准备下载 {len(files_to_download)} 个文件喵..."))
 
         # 准备临时目录
         project_temp = os.path.join(os.getcwd(), "temp_downloads")
@@ -318,13 +359,15 @@ class KemonoPlugin(DownloadPlugin):
         
         with tempfile.TemporaryDirectory(prefix=f"kemono_{post.get('id')}_", dir=project_temp) as temp_dir:
             # A. 下载筛选后的文件
-            self._download_images(files_to_download, temp_dir)
+            downloaded_files = self._download_images(files_to_download, temp_dir)
+            tqdm.write(Colors.blue(f"实际下载成功 {len(downloaded_files)} / {len(files_to_download)} 个文件喵"))
             
             # B. 解压可能存在的 zip
             self._extract_zips(temp_dir)
             
             # C. 扫描图片
             final_images = self._scan_images(temp_dir)
+            tqdm.write(Colors.blue(f"扫描到有效图片 {len(final_images)} 张喵"))
             
             # D. 打包图片 (如果有，且压缩包不存在)
             # 如果 packed_exists 为 True，我们上面已经跳过了图片下载，所以 final_images 应该为空（除非 zip 里解压出来的）
@@ -461,10 +504,19 @@ class KemonoPlugin(DownloadPlugin):
                 if not url: continue
                 if not url.startswith("http"): url = self.BASE_URL + url
                 
-                fname = f.get("name") or os.path.basename(url)
-                ext = os.path.splitext(fname)[1]
-                # 如果没有扩展名，默认 jpg? 不一定，如果是附件可能是其他
-                if not ext and not fname: ext = ".jpg" 
+                # 优化文件名提取 (同步 _process_attachments 的逻辑)
+                fname = f.get("name")
+                url_clean = url.split('?')[0]
+                
+                if not fname:
+                    fname = os.path.basename(url_clean)
+                    
+                ext = os.path.splitext(fname)[1].lower()
+                
+                if not ext:
+                    ext = os.path.splitext(os.path.basename(url_clean))[1].lower()
+                
+                if not ext: ext = ".jpg"
                 
                 # 只有常见的图片格式才重命名为 001.ext，以便 CBZ 排序
                 # 其他文件（zip, mp4, psd 等）保持原名
@@ -485,8 +537,8 @@ class KemonoPlugin(DownloadPlugin):
             for f in futures:
                 try:
                     f.result()
-                except:
-                    pass
+                except Exception as e:
+                    tqdm.write(Colors.red(f"图片下载失败: {e}"))
         return downloaded
 
     def _extract_zips(self, temp_dir: str):
@@ -675,6 +727,11 @@ class KemonoPlugin(DownloadPlugin):
             if res.status_code == 200:
                 # API 返回的如果是列表（某些版本），取第一个；通常直接是对象
                 data = res.json()
+                
+                # [Fix] API 可能返回 {"post": {...}} 包装结构
+                if isinstance(data, dict) and "post" in data:
+                    return data["post"]
+                
                 if isinstance(data, list) and len(data) > 0:
                     return data[0]
                 return data
@@ -694,6 +751,12 @@ class KemonoPlugin(DownloadPlugin):
             try:
                 res = self.session.get(url, timeout=15)
                 if res.status_code != 200:
+                    # 如果是 400 错误且 offset > 0，通常意味着翻页超出了范围（某些 API 的行为）
+                    # 我们将其视为"列表结束"，而不是致命错误
+                    if res.status_code == 400 and offset > 0:
+                        tqdm.write(Colors.yellow(f"API 返回 400 (Offset: {offset})，推测已到达列表末尾，停止翻页喵~"))
+                        break
+
                     if retry_count < 3:
                         retry_count += 1
                         print(Colors.yellow(f"API 请求失败 ({res.status_code})，正在重试 ({retry_count}/3)..."))

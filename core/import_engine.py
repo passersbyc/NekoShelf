@@ -353,10 +353,17 @@ class ImportEngine:
         # (?:\s*-\s*.+)?$              -> Optional suffix " - anything" (e.g. original filename)
         
         # We need to be specific to avoid false positives. The (ID) is the key signature of Kemono downloads.
-        m_kemono = re.match(r"^\s*(?P<author>.+?)\s*-\s*(?P<title>.+?)\s*\(\d+\)(?:\s*-\s*.+)?$", stem)
+        # Allow ID to be 'None' just in case, and capture the original filename suffix
+        m_kemono = re.match(r"^\s*(?P<author>.+?)\s*-\s*(?P<title>.+?)\s*\((?P<id>\d+|None)\)(?:\s*-\s*(?P<original>.+))?$", stem)
         if m_kemono:
              author = m_kemono.group("author").strip()
              title = m_kemono.group("title").strip()
+             original = m_kemono.group("original")
+             
+             # If title is "Untitled" and we have an original filename, use that instead
+             if title.lower() == "untitled" and original:
+                 title = original.strip()
+
              # Try to parse series from title if possible
              # Fix: If title contains series like "[Series] Title", parse_title_series_from_titlepart will handle it
              # But if title is just "Title", it returns "Title", ""

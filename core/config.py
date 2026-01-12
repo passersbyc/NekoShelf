@@ -12,7 +12,7 @@ IMPORT_CONFIG = {
     "recursive": False,  # 导入文件夹时是否递归扫描子目录
     "dry_run": False,  # 是否仅预览(不落库、不搬运、不删除)
     "delete_mode": "ask",  # 导入后是否删除源文件：keep/ask/always
-    "dup_mode": "ask",  # 遇到重复记录时如何处理：ask/skip/import
+    "dup_mode": "skip",  # 遇到重复记录时如何处理：ask/skip/import
     "parent_as_series_mode": "ask",  # 导入文件夹时文件夹名作为系列名：ask/always/never
     "defaults": {
         "title": "",  # 默认标题(一般留空，让程序从文件名解析)
