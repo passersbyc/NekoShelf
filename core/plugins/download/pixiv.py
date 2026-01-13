@@ -16,64 +16,43 @@ from tqdm import tqdm
 from .base import DownloadPlugin
 from .utils import sanitize_filename, set_file_time, create_cbz, create_pdf
 from ...utils import Colors
-from ...config import DOWNLOAD_CONFIG
+from ... import config
+from ...database import DatabaseManager
 
 class PixivPlugin(DownloadPlugin):
     BASE_URL = "https://www.pixiv.net"
-    HEADERS = {
-        "User-Agent": DOWNLOAD_CONFIG.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"),
-        "Referer": "https://www.pixiv.net/",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    }
-    MAX_RETRIES = DOWNLOAD_CONFIG.get("max_retries", 3)
-    TIMEOUT = DOWNLOAD_CONFIG.get("timeout", 10)
-    MAX_WORKERS = DOWNLOAD_CONFIG.get("max_workers", 5)
 
     def __init__(self):
         super().__init__()
         self.session = requests.Session()
-        self._configure_session()
-        self._load_cookies()
+        self._configure_session(config.get_download_config(reload=True))
+        self._load_cookies(config.get_download_config(reload=False))
 
-    def _configure_session(self):
+    def _configure_session(self, cfg: Dict[str, Any]):
+        self.MAX_RETRIES = int(cfg.get("max_retries", 3) or 3)
+        self.TIMEOUT = int(cfg.get("timeout", 10) or 10)
+        self.MAX_WORKERS = int(cfg.get("max_workers", 5) or 5)
+        
         retries = Retry(
-            total=self.MAX_RETRIES, 
+            total=self.MAX_RETRIES,
             backoff_factor=1, 
-            status_forcelist=[429, 500, 502, 503, 504]
+            status_forcelist=[500, 502, 503, 504] # 移除 429，由应用层控制
         )
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
-        self.session.headers.update(self.HEADERS)
+        headers = {
+            "User-Agent": cfg.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"),
+            "Referer": "https://www.pixiv.net/",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        self.session.headers.update(headers)
 
-    def _load_cookies(self):
-        self.cookie = DOWNLOAD_CONFIG.get("pixiv_cookie", "")
+    def _load_cookies(self, cfg: Dict[str, Any]):
+        self.cookie = cfg.get("pixiv_cookie", "")
         if self.cookie:
             self.session.headers["Cookie"] = self.cookie
-
-    def _save_cookie(self, cookie: str):
-        self.cookie = cookie
-        DOWNLOAD_CONFIG["pixiv_cookie"] = cookie
-        self.session.headers["Cookie"] = cookie
-        
-        try:
-            config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.py")
-            with open(config_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            
-            new_content = re.sub(
-                r'("pixiv_cookie":\s*")[^"]*(")',
-                f'\\1{cookie}\\2',
-                content
-            )
-            
-            if new_content != content:
-                with open(config_path, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                tqdm.write(Colors.green("Cookie 已保存到配置文件喵！"))
-        except Exception as e:
-            tqdm.write(Colors.red(f"保存 Cookie 失败: {e}"))
 
     def _check_cookie_validity(self):
         if not self.cookie: return
@@ -97,51 +76,93 @@ class PixivPlugin(DownloadPlugin):
         ]
         return any(t in url for t in targets)
 
+    def get_artist_name(self, url: str) -> str:
+        mode, pid = self._parse_url(url)
+        if not pid:
+            return ""
+        
+        # 尝试复用 _get_user_name 逻辑
+        if mode in ['USER_ALL', 'USER_ILLUSTS', 'USER_MANGA', 'USER_NOVELS']:
+             return self._get_user_name(pid)
+        
+        # 对于其他模式 (如 Series, Single Work)，尝试获取作者
+        # 但这里主要针对 follow 命令，通常是用户页
+        return ""
+
     def download(self, url: str, output_dir: str, **kwargs) -> Tuple[bool, str, Optional[str]]:
+        quiet = kwargs.get('quiet', False)
+        cfg = config.get_download_config(reload=True)
+        self._configure_session(cfg)
+        self._load_cookies(cfg)
+        
+        # 获取数据库实例
+        db = kwargs.get('db')
+
         self._check_cookie_validity()
-        if not self.cookie:
+        if not self.cookie and not quiet:
             tqdm.write(Colors.yellow("Pixiv 爬虫建议使用 Cookie 以获取完整作品 (含 R-18) 喵~"))
         
         mode, pid = self._parse_url(url)
         if not pid:
             return False, "无法解析 Pixiv URL (ID 未找到) 喵...", None
 
-        tqdm.write(Colors.pink(f"识别模式: {mode} (ID: {pid})，正在获取列表喵..."))
+        if not quiet:
+            tqdm.write(Colors.pink(f"识别模式: {mode} (ID: {pid})，正在获取列表喵..."))
         
         try:
-            author_name, works = self._get_download_targets(mode, pid)
-            tqdm.write(Colors.cyan(f"目标集合: {author_name}"))
+            author_name, works = self._get_download_targets(mode, pid, quiet=quiet)
+            if not quiet:
+                tqdm.write(Colors.cyan(f"目标集合: {author_name}"))
         except Exception as e:
             return False, f"获取信息失败: {e}", None
 
         total_works = len(works['illusts']) + len(works['manga']) + len(works['novels'])
-        tqdm.write(Colors.cyan(f"共找到 {total_works} 个作品 (插画: {len(works['illusts'])}, 漫画: {len(works['manga'])}, 小说: {len(works['novels'])})"))
+        if not quiet:
+            tqdm.write(Colors.cyan(f"共找到 {total_works} 个作品 (插画: {len(works['illusts'])}, 漫画: {len(works['manga'])}, 小说: {len(works['novels'])})"))
 
         if total_works == 0:
             return True, "没有找到可以下载的作品喵...", None
 
-        from ...config import LIBRARY_DIR
-        base_dir = output_dir if output_dir else LIBRARY_DIR
+        # 如果静默模式下发现了新作品，提示一下
+        if quiet and total_works > 0:
+             tqdm.write(Colors.green(f"发现新作品: {total_works} 个 (插画: {len(works['illusts'])}, 漫画: {len(works['manga'])}, 小说: {len(works['novels'])})"))
+
+        base_dir = output_dir if output_dir else config.get_paths(reload=False)[0]
         author_dir = os.path.join(base_dir, sanitize_filename(author_name))
         os.makedirs(author_dir, exist_ok=True)
         
         results = {'success': 0, 'fail': 0}
         
         if works['novels']:
-            self._process_batch(works['novels'], author_dir, "Novel", self._download_novel_safe, results)
+            self._process_batch(works['novels'], author_dir, "Novel", 
+                              lambda nid, d: self._download_novel_safe(nid, d), 
+                              results, quiet=quiet)
 
         illust_manga_ids = works['illusts'] + works['manga']
         if illust_manga_ids:
             self._process_batch(illust_manga_ids, author_dir, "Illust/Manga", 
-                              lambda iid, d: self._download_illust_safe(iid, d, output_dir), results)
+                              lambda iid, d: self._download_illust_safe(iid, d), 
+                              results, quiet=quiet)
 
         return True, f"爬取完成喵！成功: {results['success']}, 失败: {results['fail']}", author_dir
 
-    def _process_batch(self, items: List[str], save_dir: str, desc: str, func, stats: Dict):
-        tqdm.write(Colors.yellow(f"--- 开始下载 {len(items)} 部 {desc} ---"))
+    def _process_batch(self, items: List[str], save_dir: str, desc: str, func, stats: Dict, quiet: bool = False):
+        if not quiet:
+            tqdm.write(Colors.yellow(f"--- 开始下载 {len(items)} 部 {desc} ---"))
+        
+        # 动态调整并发数：如果任务很多，保守一点，避免被封
+        workers = self.MAX_WORKERS
+        if len(items) > 50 and workers > 3:
+            workers = 3
+            
         with tqdm(total=len(items), unit="work", desc=f"Downloading {desc}") as pbar:
-            with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
-                futures = {executor.submit(func, item, save_dir): item for item in items}
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {}
+                for item in items:
+                    futures[executor.submit(func, item, save_dir)] = item
+                    # 提交任务时稍微错开一点时间，避免瞬间并发峰值
+                    time.sleep(0.1)
+                    
                 for future in as_completed(futures):
                     if future.result():
                         stats['success'] += 1
@@ -150,33 +171,69 @@ class PixivPlugin(DownloadPlugin):
                     pbar.update(1)
 
     def _request(self, url: str, stream: bool = False, json_response: bool = True) -> Any:
+        import random
+        
+        # 指数退避策略: 基础等待时间 * (2 ^ 重试次数) + 随机抖动
+        base_wait = 5 
+        
         for attempt in range(self.MAX_RETRIES):
             try:
                 res = self.session.get(url, timeout=self.TIMEOUT, stream=stream)
+                
                 if res.status_code == 200:
                     if json_response:
                         return res.json()
                     return res
+                    
                 elif res.status_code == 404:
                     return None
-            except Exception:
+                    
+                elif res.status_code == 429:
+                    # 指数退避
+                    wait_time = base_wait * (2 ** attempt) + random.uniform(1, 5)
+                    # 限制最大等待时间 (例如 120秒)
+                    wait_time = min(wait_time, 120)
+                    
+                    tqdm.write(Colors.yellow(f"触发限流 (429)，冷却 {wait_time:.1f}秒后重试... ({attempt+1}/{self.MAX_RETRIES})"))
+                    time.sleep(wait_time)
+                    continue
+                    
+                else:
+                    tqdm.write(Colors.yellow(f"请求异常 (Code: {res.status_code}): {url}"))
+                    
+            except Exception as e:
+                if attempt > 0: 
+                    tqdm.write(Colors.yellow(f"请求超时/失败 ({attempt+1}/{self.MAX_RETRIES}): {e} -> {url}"))
                 pass
-            time.sleep(1 + attempt)
+            
+            # 普通重试的间隔
+            sleep_time = 2 + attempt + random.random()
+            time.sleep(sleep_time)
+            
+        tqdm.write(Colors.red(f"请求彻底失败: {url}"))
         return None
 
     def _download_novel_safe(self, nid: str, save_dir: str) -> bool:
+        db = None
         try:
-            return self._download_novel(nid, save_dir)
+            db = DatabaseManager(config.DB_FILE)
+            return self._download_novel(nid, save_dir, db=db)
         except Exception as e:
             tqdm.write(Colors.red(f"小说 {nid} 下载失败: {e}"))
             return False
+        finally:
+            if db: db.close()
 
     def _download_illust_safe(self, iid: str, save_dir: str, temp_root: Optional[str] = None) -> bool:
+        db = None
         try:
-            return self._download_illust(iid, save_dir, temp_root)
+            db = DatabaseManager(config.DB_FILE)
+            return self._download_illust(iid, save_dir, temp_root, db=db)
         except Exception as e:
-            tqdm.write(Colors.red(f"漫画/插画 {iid} 下载失败: {e}"))
+            tqdm.write(Colors.red(f"插画/漫画 {iid} 下载失败: {e}"))
             return False
+        finally:
+            if db: db.close()
 
     def _parse_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
         if m := re.search(r'novel/series/(\d+)', url): return 'SERIES', m.group(1)
@@ -192,7 +249,7 @@ class PixivPlugin(DownloadPlugin):
             return 'USER_ALL', uid
         return None, None
 
-    def _get_download_targets(self, mode: str, pid: str) -> Tuple[str, Dict[str, List[str]]]:
+    def _get_download_targets(self, mode: str, pid: str, quiet: bool = False) -> Tuple[str, Dict[str, List[str]]]:
         works = {'illusts': [], 'manga': [], 'novels': []}
         author_name = "Unknown"
         
@@ -249,7 +306,33 @@ class PixivPlugin(DownloadPlugin):
             elif mode == 'USER_ILLUSTS': works['illusts'] = all_works['illusts']
             elif mode == 'USER_MANGA': works['manga'] = all_works['manga']
             elif mode == 'USER_NOVELS': works['novels'] = all_works['novels']
+        
+        # 过滤已下载的作品
+        db = None
+        try:
+            db = DatabaseManager(config.DB_FILE)
+            for wtype in ['illusts', 'manga', 'novels']:
+                if not works[wtype]: continue
                 
+                original_count = len(works[wtype])
+                new_list = []
+                for wid in works[wtype]:
+                    # 构造 work_id (illust:xxx, novel:xxx)
+                    prefix = "novel" if wtype == 'novels' else "illust"
+                    full_id = f"{prefix}:{wid}"
+                    
+                    if not db.get_download_record("pixiv", full_id):
+                        new_list.append(wid)
+                
+                works[wtype] = new_list
+                skipped = original_count - len(new_list)
+                if skipped > 0 and not quiet:
+                    tqdm.write(Colors.pink(f"已跳过 {skipped} 个已下载的 {wtype} 喵~"))
+        except Exception as e:
+             tqdm.write(Colors.yellow(f"检查下载记录失败: {e}，将尝试下载所有内容"))
+        finally:
+            if db: db.close()
+
         return author_name, works
 
     def _crawl_series_by_traversal(self, first_id: str) -> List[str]:
@@ -365,25 +448,94 @@ class PixivPlugin(DownloadPlugin):
         tqdm.write(Colors.yellow(f"API 获取用户名失败，尝试解析主页喵..."))
         res = self._request(f"{self.BASE_URL}/users/{user_id}", json_response=False)
         if res:
-            if m := re.search(r'<title>(.*?)\s-\s(?:pixiv|插画|漫画).*?</title>', res.text):
+            text = res.text
+            # Try og:title
+            if m := re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', text):
+                clean = re.sub(r'\s-\s(?:pixiv|插画|漫画).*$', '', m.group(1)).strip()
+                if clean: return clean
+                
+            # Try twitter:title
+            if m := re.search(r'<meta\s+name="twitter:title"\s+content="([^"]+)"', text):
+                clean = re.sub(r'\s-\s(?:pixiv|插画|漫画).*$', '', m.group(1)).strip()
+                if clean: return clean
+
+            # Try title tag with flexible separator
+            if m := re.search(r'<title>(.*?)(?:\s-\s(?:pixiv|插画|漫画)|\|| - ).*?</title>', text):
                 return m.group(1).strip()
                 
         return f"User_{user_id}"
 
     def _get_user_works(self, user_id: str) -> Dict[str, List[str]]:
         data = self._request(f"{self.BASE_URL}/ajax/user/{user_id}/profile/all")
-        body = data.get('body', {}) if data else {}
         
-        def _safe_keys(val):
-            return list(val.keys()) if isinstance(val, dict) else []
+        # Check if API request was successful
+        if data and not data.get('error'):
+            body = data.get('body', {})
+            def _safe_keys(val):
+                return list(val.keys()) if isinstance(val, dict) else []
 
-        return {
-            'illusts': _safe_keys(body.get('illusts')),
-            'manga': _safe_keys(body.get('manga')),
-            'novels': _safe_keys(body.get('novels'))
-        }
+            return {
+                'illusts': _safe_keys(body.get('illusts')),
+                'manga': _safe_keys(body.get('manga')),
+                'novels': _safe_keys(body.get('novels'))
+            }
+            
+        # Fallback: Scrape from HTML
+        tqdm.write(Colors.yellow(f"API 获取作品列表失败，尝试解析主页喵..."))
+        res = self._request(f"{self.BASE_URL}/users/{user_id}", json_response=False)
+        if not res:
+            return {'illusts': [], 'manga': [], 'novels': []}
+            
+        return self._scrape_works_from_html(res.text)
 
-    def _download_novel(self, nid: str, save_dir: str) -> bool:
+    def _scrape_works_from_html(self, html_content: str) -> Dict[str, List[str]]:
+        works = {'illusts': [], 'manga': [], 'novels': []}
+        
+        # Try global-data
+        if meta_match := re.search(r'<meta\s+[^>]*name="global-data"\s+[^>]*content="([^"]+)"', html_content):
+            try:
+                json_str = html.unescape(meta_match.group(1))
+                data = json.loads(json_str)
+                
+                def _extract_ids(key):
+                    if val := data.get(key):
+                        return list(val.keys()) if isinstance(val, dict) else []
+                    return []
+                
+                works['illusts'] = _extract_ids('illusts')
+                works['manga'] = _extract_ids('manga')
+                works['novels'] = _extract_ids('novels')
+                
+                total = len(works['illusts']) + len(works['manga']) + len(works['novels'])
+                if total > 0:
+                    tqdm.write(Colors.pink(f"网页解析成功: 找到 {total} 个作品喵！"))
+                    return works
+            except Exception as e:
+                tqdm.write(Colors.red(f"解析 global-data 失败: {e}"))
+        
+        return works
+
+    def _download_novel(self, nid: str, save_dir: str, db=None) -> bool:
+        # Check if file already exists by ID to avoid API call
+        if os.path.exists(save_dir):
+            target_pattern = f"(pixiv:novel:{nid})"
+            # 1. 检查本地文件系统
+            for fname in os.listdir(save_dir):
+                if target_pattern in fname and fname.endswith(".txt"):
+                    fpath = os.path.join(save_dir, fname)
+                    if os.path.getsize(fpath) > 0:
+                        # tqdm.write(Colors.green(f"已存在跳过: {fname}")) # 减少刷屏
+                        return True
+                        
+        # 2. 检查数据库记录 (防止搬运后再次下载)
+        if db:
+            record = db.get_download_record("pixiv", f"novel:{nid}")
+            if record:
+                # 进一步检查文件是否存在（如果被手动删除了，可能需要重新下载，但这里我们假设记录存在即已完成）
+                # 或者我们可以根据需求：如果有记录且文件存在->跳过；有记录但文件不存在->重新下载
+                # 这里为了性能，先简单判断：有记录就跳过
+                return True
+
         data = self._request(f"{self.BASE_URL}/ajax/novel/{nid}")
         if not data or data.get('error'): return False
         
@@ -410,9 +562,37 @@ class PixivPlugin(DownloadPlugin):
             f.write(full_text)
             
         set_file_time(file_path, body.get('createDate') or body.get('uploadDate'))
+        
+        # 下载完成后，记录到数据库
+        if db:
+            # 假设 title 就是标题
+            db.add_download_record(
+                platform="pixiv",
+                work_id=f"novel:{nid}",
+                title=title,
+                author=author_name,
+                local_path=file_path
+            )
+
         return True
 
-    def _download_illust(self, iid: str, save_dir: str, temp_root: Optional[str] = None) -> bool:
+    def _download_illust(self, iid: str, save_dir: str, temp_root: Optional[str] = None, db=None) -> bool:
+        cfg = config.get_download_config(reload=False)
+        
+        # 检查本地文件是否存在
+        # 这里只是粗略检查，因为不知道具体的格式
+        if os.path.exists(save_dir):
+             target_pattern = f"(pixiv:illust:{iid})"
+             for fname in os.listdir(save_dir):
+                 if target_pattern in fname and os.path.getsize(os.path.join(save_dir, fname)) > 0:
+                     return True
+        
+        # 检查数据库记录
+        if db:
+            record = db.get_download_record("pixiv", f"illust:{iid}")
+            if record:
+                return True
+
         data = self._request(f"{self.BASE_URL}/ajax/illust/{iid}/pages")
         if not data: return False
         pages = data.get('body', [])
@@ -425,14 +605,14 @@ class PixivPlugin(DownloadPlugin):
         author_name = meta_body.get('userName') or "Unknown"
         base_name = sanitize_filename(f"{author_name} - {title} (pixiv:illust:{iid})")
         
-        fmt = DOWNLOAD_CONFIG.get("pixiv_format", "pdf").lower()
+        fmt = str(cfg.get("pixiv_format", "pdf") or "pdf").lower()
         if fmt not in ["cbz", "pdf"]: fmt = "pdf"
         
         output_ext = f".{fmt}"
         output_path = os.path.join(save_dir, f"{base_name}{output_ext}")
         
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            tqdm.write(Colors.green(f"已存在跳过: {base_name}{output_ext}"))
+            # tqdm.write(Colors.green(f"已存在跳过: {base_name}{output_ext}"))
             return True
 
         work_dir = os.path.join(temp_root or save_dir, f"_temp_{base_name}")
@@ -488,6 +668,17 @@ class PixivPlugin(DownloadPlugin):
             )
         
         shutil.rmtree(work_dir, ignore_errors=True)
+
+        # 下载完成后，记录到数据库
+        if success and db:
+            db.add_download_record(
+                platform="pixiv",
+                work_id=f"illust:{iid}",
+                title=title,
+                author=author_name,
+                local_path=output_path
+            )
+
         return success
 
     def _download_image(self, url: str, save_path: str) -> bool:

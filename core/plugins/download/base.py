@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Tuple, Optional
 
 class DownloadPlugin(ABC):
     @abstractmethod
@@ -7,18 +8,29 @@ class DownloadPlugin(ABC):
         pass
 
     @abstractmethod
-    def download(self, url: str, output_dir: str, **kwargs) -> tuple[bool, str, str]:
+    def download(self, url: str, output_dir: str, **kwargs) -> Tuple[bool, str, Optional[str]]:
         """
-        Download content from the URL.
-        :param url: The URL to download from.
-        :param output_dir: The directory to save the downloaded content.
-        :param kwargs: Additional arguments (e.g., series_name).
-        :return: (success, message, saved_path)
+        下载资源
+        
+        Args:
+            url: 目标URL
+            output_dir: 输出目录
+            **kwargs: 额外参数 (如 db 实例)
+            
+        Returns:
+            (success, message, output_path)
         """
-        pass
+        raise NotImplementedError
     
     @property
     @abstractmethod
     def name(self) -> str:
         """Return the name of the plugin."""
         pass
+
+    def get_artist_name(self, url: str) -> str:
+        """
+        Get artist name from URL.
+        Optional implementation.
+        """
+        return ""

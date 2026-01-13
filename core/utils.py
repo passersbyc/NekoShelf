@@ -59,6 +59,9 @@ class Colors:
     @staticmethod
     def red(text): return f"{Colors.RED}{text}{Colors.RESET}"
 
+    @staticmethod
+    def dim(text): return f"\033[2m{text}{Colors.RESET}"
+
 
 def fullwidth_to_halfwidth(text: str) -> str:
     s = "" if text is None else str(text)

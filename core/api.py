@@ -1,15 +1,16 @@
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .config import DB_FILE, LIBRARY_DIR
+from . import config
 from .database import DatabaseManager
 from .file_manager import FileManager
 from .download_service import DownloadImportService
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8765, db_path: str = DB_FILE, library_dir: str = LIBRARY_DIR):
-    db = DatabaseManager(db_path)
-    fm = FileManager(library_dir)
+def run_server(host: str = "127.0.0.1", port: int = 8765, db_path: str = "", library_dir: str = ""):
+    cfg = config.load(reload=True)
+    db = DatabaseManager(db_path or cfg["db_file"])
+    fm = FileManager(library_dir or cfg["library_dir"])
     svc = DownloadImportService(db, fm)
 
     class Handler(BaseHTTPRequestHandler):
@@ -68,4 +69,3 @@ def run_server(host: str = "127.0.0.1", port: int = 8765, db_path: str = DB_FILE
             db.close()
         except Exception:
             pass
-

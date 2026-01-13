@@ -1,9 +1,151 @@
-# 配置
+"""NekoShelf 配置
+
+本文件既是“配置项声明”，也是“配置加载入口”。
+
+路径配置
+- LIBRARY_PATH: 书库存储路径（默认: library）。支持绝对路径/相对路径。
+  * 相对路径以当前工作目录为基准（一般是运行 main.py 的目录）。
+- DB_PATH: SQLite 数据库路径（默认: library.db）。支持绝对路径/相对路径。
+
+Cookie 配置（敏感信息）
+- 推荐通过环境变量配置：
+  * NEKOSHELF_PIXIV_COOKIE
+  * NEKOSHELF_KEMONO_COOKIE
+- Cookie 值既可以是明文，也可以是加密字符串（前缀 enc:）。
+  * 若使用 enc:，解密密钥通过环境变量 NEKOSHELF_SECRET_KEY 提供，不写入仓库。
+
+加密/解密说明
+- 需要安装依赖 cryptography（已在 pyproject.toml 中声明）。
+- 生成加密串示例（在项目根目录执行）：
+  python3 -c "from core.config import encrypt_secret; print(encrypt_secret('YOUR_COOKIE'))"
+  然后把输出粘贴到环境变量 NEKOSHELF_PIXIV_COOKIE / NEKOSHELF_KEMONO_COOKIE（带 enc: 前缀）里。
+"""
+
+import base64
+import hashlib
+import importlib
 import os
+import sys
+from typing import Any, Dict
+
 
 VERSION = "1.1"
-LIBRARY_DIR = "library"
-DB_FILE = "library.db"
+
+
+LIBRARY_PATH = os.environ.get("NEKOSHELF_LIBRARY_PATH", "library")
+DB_PATH = os.environ.get("NEKOSHELF_DB_PATH", "library.db")
+
+
+PIXIV_COOKIE = os.environ.get("NEKOSHELF_PIXIV_COOKIE", "")
+KEMONO_COOKIE = os.environ.get("NEKOSHELF_KEMONO_COOKIE", "")
+
+
+def _resolve_path(p: str) -> str:
+    s = "" if p is None else str(p).strip()
+    if not s:
+        return ""
+    try:
+        s = os.path.expanduser(os.path.expandvars(s))
+    except Exception:
+        pass
+    if not os.path.isabs(s):
+        try:
+            s = os.path.join(os.getcwd(), s)
+        except Exception:
+            pass
+    try:
+        return os.path.normpath(os.path.abspath(s))
+    except Exception:
+        return s
+
+
+def _get_secret_key() -> str:
+    try:
+        return str(os.environ.get("NEKOSHELF_SECRET_KEY", "") or "")
+    except Exception:
+        return ""
+
+
+def _fernet(secret_key: str):
+    try:
+        mod = importlib.import_module("cryptography.fernet")
+        Fernet = getattr(mod, "Fernet")
+    except Exception as e:
+        raise RuntimeError("缺少依赖 cryptography，无法解密 enc: 配置") from e
+
+    if not secret_key:
+        raise RuntimeError("NEKOSHELF_SECRET_KEY 为空，无法解密 enc: 配置")
+
+    key_bytes = hashlib.sha256(secret_key.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(key_bytes))
+
+
+def encrypt_secret(plaintext: str) -> str:
+    s = "" if plaintext is None else str(plaintext)
+    if not s:
+        return ""
+    f = _fernet(_get_secret_key())
+    token = f.encrypt(s.encode("utf-8")).decode("utf-8")
+    return "enc:" + token
+
+
+def decrypt_secret(value: str) -> str:
+    s = "" if value is None else str(value)
+    s = s.strip()
+    if not s:
+        return ""
+    if not s.startswith("enc:"):
+        return s
+
+    token = s[len("enc:") :].strip()
+    f = _fernet(_get_secret_key())
+    try:
+        return f.decrypt(token.encode("utf-8")).decode("utf-8")
+    except Exception as e:
+        raise RuntimeError("Cookie 解密失败：请检查 NEKOSHELF_SECRET_KEY 与 enc: 内容") from e
+
+
+def load(reload: bool = False) -> Dict[str, Any]:
+    mod = sys.modules.get(__name__)
+    if reload and mod is not None:
+        mod = importlib.reload(mod)
+
+    library_dir = _resolve_path(getattr(mod, "LIBRARY_PATH", "library"))
+    db_file = _resolve_path(getattr(mod, "DB_PATH", "library.db"))
+
+    if not library_dir:
+        raise ValueError("LIBRARY_PATH 不能为空")
+    if not db_file:
+        raise ValueError("DB_PATH 不能为空")
+
+    pixiv_cookie_raw = getattr(mod, "PIXIV_COOKIE", "")
+    kemono_cookie_raw = getattr(mod, "KEMONO_COOKIE", "")
+
+    download_cfg = dict(getattr(mod, "DOWNLOAD_CONFIG", {}) or {})
+    download_cfg["pixiv_cookie"] = decrypt_secret(pixiv_cookie_raw)
+    download_cfg["kemono_cookie"] = decrypt_secret(kemono_cookie_raw)
+
+    return {
+        "version": getattr(mod, "VERSION", ""),
+        "library_dir": library_dir,
+        "db_file": db_file,
+        "import_config": dict(getattr(mod, "IMPORT_CONFIG", {}) or {}),
+        "download_config": download_cfg,
+        "update_config": dict(getattr(mod, "UPDATE_CONFIG", {}) or {}),
+    }
+
+
+def get_paths(reload: bool = False) -> tuple[str, str]:
+    cfg = load(reload=reload)
+    return str(cfg["library_dir"]), str(cfg["db_file"])
+
+
+def get_download_config(reload: bool = False) -> Dict[str, Any]:
+    return dict(load(reload=reload)["download_config"])
+
+
+LIBRARY_DIR = _resolve_path(LIBRARY_PATH)
+DB_FILE = _resolve_path(DB_PATH)
 
 # 导入(import)行为配置：平时只要粘贴路径即可，默认行为由这里统一管理
 # 可选值说明：
@@ -41,12 +183,12 @@ DOWNLOAD_CONFIG = {
     
     # Pixiv 专属配置
     "pixiv_format": "pdf", # 漫画/插画下载格式: pdf (默认) 或 cbz
-    "pixiv_cookie": os.environ.get("NEKOSHELF_PIXIV_COOKIE", ""), # Pixiv Cookie
+    "pixiv_cookie": "", # Pixiv Cookie (由环境变量 NEKOSHELF_PIXIV_COOKIE 解密后注入)
 
     # Kemono 专属配置
     "kemono_base_url": "https://kemono.cr", # Kemono 镜像站地址
     "kemono_api_base": "https://kemono.cr/api/v1", # Kemono API 地址
-    "kemono_cookie": os.environ.get("NEKOSHELF_KEMONO_COOKIE", ""), # Kemono Cookie (如有需要)
+    "kemono_cookie": "", # Kemono Cookie (由环境变量 NEKOSHELF_KEMONO_COOKIE 解密后注入)
     "kemono_format": "pdf", # 漫画/插画下载格式: pdf (默认) 或 cbz
     "kemono_save_content": False, # 是否在下载附件的同时保存帖子正文内容 (默认 False)
 }

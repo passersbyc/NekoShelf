@@ -19,6 +19,10 @@ class DownloadImportService:
         )
         self._downloader = DownloadManager()
 
+    @property
+    def manager(self):
+        return self._downloader
+
     def download_and_import(
         self,
         url: str,
@@ -28,6 +32,7 @@ class DownloadImportService:
         kemono_dl_mode: str = "attachment",
         dry_run: bool = False,
         dup_mode: str = "skip",
+        quiet: bool = False,
     ):
         download_dir = (download_dir or "").strip()
         created_temp = False
@@ -47,6 +52,8 @@ class DownloadImportService:
             series_name=series_name,
             save_content=save_content,
             kemono_dl_mode=kemono_dl_mode,
+            db=self.db, # 注入数据库实例
+            quiet=quiet,
         )
         ok = bool(dl.get("success"))
         msg = str(dl.get("message") or "")
@@ -92,6 +99,7 @@ class DownloadImportService:
                                 dup_mode=dup_mode,
                                 dup_choice=dup_choice,
                                 hash_cache=hash_cache,
+                                quiet=quiet,
                             )
                             if ok2:
                                 if is_dup:
@@ -113,6 +121,7 @@ class DownloadImportService:
                             dup_mode=dup_mode,
                             dup_choice=dup_choice,
                             hash_cache=hash_cache,
+                            quiet=quiet,
                         )
                         if ok2:
                             if is_dup:

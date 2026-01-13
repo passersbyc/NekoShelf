@@ -10,7 +10,7 @@ except Exception:
 from .database import DatabaseManager
 from .file_manager import FileManager
 from .utils import Colors
-from .config import DB_FILE, LIBRARY_DIR, VERSION
+from . import config
 from .commands import LibraryCommandsMixin, QueryCommandsMixin, ManageCommandsMixin, SystemCommandsMixin
 
 
@@ -83,8 +83,8 @@ class MoeCLI(
             return s
 
     def _build_intro(self):
-        lib_abs = str(os.path.abspath(str(LIBRARY_DIR)))
-        db_abs = str(os.path.abspath(str(DB_FILE)))
+        lib_abs = str(os.path.abspath(str(self._cfg.get("library_dir") or "")))
+        db_abs = str(os.path.abspath(str(self._cfg.get("db_file") or "")))
         hist_abs = self._history_file()
 
         stats = None
@@ -136,7 +136,7 @@ class MoeCLI(
 
         lines = []
         lines.append(f"{Colors.HEADER}{Colors.BOLD}╔══════════════════════════════════════════════════════╗{Colors.RESET}")
-        lines.append(f"{Colors.HEADER}{Colors.BOLD}║{Colors.RESET}   /\\_/\\    {Colors.BOLD}萌萌的本地化漫画小说自动管理系统 v{VERSION}{Colors.RESET}     {Colors.HEADER}{Colors.BOLD}║{Colors.RESET}")
+        lines.append(f"{Colors.HEADER}{Colors.BOLD}║{Colors.RESET}   /\\_/\\    {Colors.BOLD}萌萌的本地化漫画小说自动管理系统 v{config.VERSION}{Colors.RESET}     {Colors.HEADER}{Colors.BOLD}║{Colors.RESET}")
         lines.append(f"{Colors.HEADER}{Colors.BOLD}║{Colors.RESET}  ( o.o )    {Colors.CYAN}help {Colors.RESET} 查看命令   {Colors.CYAN}exit{Colors.RESET} 退出               {Colors.HEADER}{Colors.BOLD}║{Colors.RESET}")
         lines.append(f"{Colors.HEADER}{Colors.BOLD}║{Colors.RESET}   > ^ <     {Colors.YELLOW}本地书库{Colors.RESET}: {Colors.green(str(total))} 本                         {Colors.HEADER}{Colors.BOLD}║{Colors.RESET}")
         lines.append(f"{Colors.HEADER}{Colors.BOLD}╚══════════════════════════════════════════════════════╝{Colors.RESET}")
@@ -153,6 +153,7 @@ class MoeCLI(
         lines.append(f"  {Colors.BLUE}{Colors.BOLD}【导入】{Colors.RESET}  {Colors.GREEN}import{Colors.RESET}  ·  {Colors.GREEN}download{Colors.RESET}")
         lines.append(f"  {Colors.BLUE}{Colors.BOLD}【查询】{Colors.RESET}  {Colors.GREEN}list{Colors.RESET}   ·  {Colors.GREEN}search{Colors.RESET}   ·  {Colors.GREEN}stats{Colors.RESET}")
         lines.append(f"  {Colors.BLUE}{Colors.BOLD}【管理】{Colors.RESET}  {Colors.GREEN}update{Colors.RESET}  ·  {Colors.GREEN}delete{Colors.RESET}  ·  {Colors.GREEN}export{Colors.RESET}")
+        lines.append(f"  {Colors.BLUE}{Colors.BOLD}【追更】{Colors.RESET}  {Colors.GREEN}follow{Colors.RESET}  ·  {Colors.GREEN}pull{Colors.RESET}     ·  {Colors.GREEN}subs{Colors.RESET}")
         lines.append(f"  {Colors.BLUE}{Colors.BOLD}【维护】{Colors.RESET}  {Colors.GREEN}clean{Colors.RESET}   ·  {Colors.GREEN}clear{Colors.RESET}   ·  {Colors.GREEN}exit{Colors.RESET}")
         lines.append("")
 
@@ -162,6 +163,8 @@ class MoeCLI(
             ("search", "<关键字/过滤器>", "搜索（author:/series:/tag:）"),
             ("download", "<URL>", "下载并自动归档"),
             ("update", "<选择器> 字段=值", "批量修改信息"),
+            ("follow", "<URL>", "关注作者"),
+            ("pull", "", "一键更新订阅"),
             ("list", "", "列出书架"),
             ("delete", "<选择器>", "删除记录/文件"),
             ("export", "<选择器>", "导出/打包"),
@@ -231,10 +234,39 @@ class MoeCLI(
 
     def __init__(self):
         super().__init__()
-        self.db = DatabaseManager(DB_FILE)
-        self.fm = FileManager(LIBRARY_DIR)
+        self._cfg = config.load(reload=True)
+        self.db = DatabaseManager(self._cfg["db_file"])
+        self.fm = FileManager(self._cfg["library_dir"])
         self.intro = self._build_intro()
         self.prompt = self._readline_safe_prompt(self.prompt)
+
+    def _refresh_runtime_config(self):
+        try:
+            new_cfg = config.load(reload=True)
+        except Exception:
+            return
+
+        if str(new_cfg.get("library_dir") or "") and str(new_cfg.get("library_dir")) != str(self._cfg.get("library_dir")):
+            try:
+                self.fm = FileManager(new_cfg["library_dir"])
+            except Exception:
+                pass
+
+        if str(new_cfg.get("db_file") or "") and str(new_cfg.get("db_file")) != str(self._cfg.get("db_file")):
+            try:
+                try:
+                    self.db.close()
+                except Exception:
+                    pass
+                self.db = DatabaseManager(new_cfg["db_file"])
+            except Exception:
+                pass
+
+        self._cfg = new_cfg
+
+    def precmd(self, line):
+        self._refresh_runtime_config()
+        return super().precmd(line)
 
     def preloop(self):
         self._load_history()

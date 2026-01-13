@@ -4,7 +4,7 @@ import re
 import urllib.parse
 from .base import DownloadPlugin
 from ...utils import Colors
-from ...config import DOWNLOAD_CONFIG
+from ... import config
 
 class CommonPlugin(DownloadPlugin):
     @property
@@ -16,9 +16,10 @@ class CommonPlugin(DownloadPlugin):
 
     def download(self, url: str, output_dir: str, **kwargs) -> tuple[bool, str, str]:
         try:
+            cfg = config.get_download_config(reload=True)
             # Setup headers
             headers = {
-                'User-Agent': DOWNLOAD_CONFIG.get("user_agent", 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36')
+                'User-Agent': cfg.get("user_agent", 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36')
             }
 
             print(Colors.cyan(f"正在请求链接: {url} ..."))
@@ -36,7 +37,7 @@ class CommonPlugin(DownloadPlugin):
             if existing > 0:
                 headers["Range"] = f"bytes={existing}-"
 
-            r = requests.get(url, stream=True, headers=headers, verify=False, timeout=DOWNLOAD_CONFIG.get("timeout", 10))
+            r = requests.get(url, stream=True, headers=headers, verify=False, timeout=cfg.get("timeout", 10))
             try:
                 if existing > 0 and r.status_code in (416,):
                     return True, f"已存在(断点续传已完成)喵！已保存到: {dest_path}", dest_path
@@ -53,7 +54,7 @@ class CommonPlugin(DownloadPlugin):
                         r.close()
                     except Exception:
                         pass
-                    r = requests.get(url, stream=True, headers=headers, verify=False, timeout=DOWNLOAD_CONFIG.get("timeout", 10))
+                    r = requests.get(url, stream=True, headers=headers, verify=False, timeout=cfg.get("timeout", 10))
 
                 r.raise_for_status()
 

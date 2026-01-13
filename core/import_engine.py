@@ -575,7 +575,7 @@ class ImportEngine:
                 return s[len(p) :].lstrip()
         return s
 
-    def import_one(self, file_path, overrides=None, dry_run=False, dup_mode="ask", dup_choice=None, hash_cache=None):
+    def import_one(self, file_path, overrides=None, dry_run=False, dup_mode="ask", dup_choice=None, hash_cache=None, quiet=False):
         overrides = overrides or {}
         meta = self.parse_metadata_from_filename(file_path) or {}
 
@@ -829,12 +829,13 @@ class ImportEngine:
                 action = "skip"
 
             if action == "skip":
-                print(Colors.yellow("发现重复导入，已跳过喵~"))
-                try:
-                    bid = dup_book["id"]
-                    print(Colors.cyan(f"  已存在记录 ID: {bid}"))
-                except Exception:
-                    pass
+                if not quiet:
+                    print(Colors.yellow("发现重复导入，已跳过喵~"))
+                    try:
+                        bid = dup_book["id"]
+                        print(Colors.cyan(f"  已存在记录 ID: {bid}"))
+                    except Exception:
+                        pass
                 try:
                     platform = (overrides.get("source_platform") if overrides and "source_platform" in overrides else meta.get("source_platform"))
                     work_id = (overrides.get("source_work_id") if overrides and "source_work_id" in overrides else meta.get("source_work_id"))

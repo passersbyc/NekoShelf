@@ -5,6 +5,11 @@ import shlex
 import shutil
 import datetime
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
 from ..import_engine import ImportEngine
 from ..config import VERSION
 from ..utils import Colors, simple_complete, path_complete, get_logger
@@ -176,6 +181,12 @@ class SystemCommandsMixin:
         print(f"  {cmd('delete')}   {Colors.yellow('删除书籍')}  {dim('(文件和记录)')}")
         print(f"  {cmd('update')}   {Colors.yellow('修改书籍信息')}  {dim('(支持批量/筛选/ids/自动移动)')}")
 
+        print(f"\n{section('📡 追更管理')}")
+        print(f"  {cmd('follow')}   {Colors.yellow('关注作者')}  {dim('(自动检查新作品)')}")
+        print(f"  {cmd('unfollow')} {Colors.yellow('取消关注')}  {dim('(移除订阅)')}")
+        print(f"  {cmd('subs')}     {Colors.yellow('查看订阅列表')}  {dim('(列出所有关注者)')}")
+        print(f"  {cmd('pull')}     {Colors.yellow('一键更新')}  {dim('(检查所有订阅更新)')}")
+
         print(f"\n{section('🔧 系统维护')}")
         print(f"  {cmd('stats')}    {Colors.yellow('查看统计信息')}")
         print(f"  {cmd('clean')}    {Colors.yellow('清理并可同步藏书目录')}  {dim('(补录/纠正路径/删非法)')}")
@@ -296,7 +307,8 @@ class SystemCommandsMixin:
         print(Colors.red(f"\n{Colors.BOLD}⚠️  危险操作警告 ⚠️{Colors.RESET}"))
         print(Colors.red("即将清空所有数据，包括："))
         print(Colors.red("1. 数据库中的所有书籍和作者记录"))
-        print(Colors.red("2. 书库目录下的所有文件 (实体书)"))
+        print(Colors.red("2. 所有的追更订阅和下载记录"))
+        print(Colors.red("3. 书库目录下的所有文件 (实体书)"))
         print(Colors.red("此操作不可恢复！"))
 
         if not force:
@@ -342,10 +354,8 @@ class SystemCommandsMixin:
         - --fix / --apply
         - --yes / -y
         - --dry-run
+        - --deep (强制进行哈希校验，较慢)
         """
-        if silent:
-            return
-
         def safe_split(s):
             try:
                 return shlex.split((s or "").strip()) if (s or "").strip() else []
@@ -355,6 +365,7 @@ class SystemCommandsMixin:
         tokens = safe_split(arg)
         yes = ("--yes" in tokens) or ("-y" in tokens)
         fix = ("--fix" in tokens) or ("--apply" in tokens) or ("--repair" in tokens)
+        deep_verify = "--deep" in tokens
 
         dir_filter = ""
         type_filter = ""
@@ -464,7 +475,11 @@ class SystemCommandsMixin:
             cwd = ""
 
         scanned = 0
-        for fp in iter_files(scope_root):
+        iterator = iter_files(scope_root)
+        if tqdm:
+            iterator = tqdm(iterator, desc="扫描文件", unit="file", mininterval=0.5)
+
+        for fp in iterator:
             scanned += 1
             base = os.path.basename(fp)
             if base.startswith("."):
@@ -509,7 +524,7 @@ class SystemCommandsMixin:
                 if c and c not in file_lookup:
                     file_lookup[c] = ap
 
-            if scanned % 500 == 0:
+            if (not tqdm) and scanned % 500 == 0:
                 print(Colors.cyan(f"已扫描 {scanned} 个文件喵..."))
 
         if resume_from:
@@ -605,7 +620,11 @@ class SystemCommandsMixin:
                 if ids:
                     duplicates_records.append({"path": ap, "ids": sorted(ids)})
 
-        for bid, b in db_by_id.items():
+        iterator_db = db_by_id.items()
+        if tqdm:
+            iterator_db = tqdm(iterator_db, desc="分析数据库", unit="rec", mininterval=0.5)
+
+        for bid, b in iterator_db:
             fp = ""
             try:
                 fp = b["file_path"]
@@ -641,13 +660,20 @@ class SystemCommandsMixin:
                     db_hash = ""
 
                 need_size = (db_size is None) or (int(db_size) != int(info.get("size") or 0))
-                need_mtime = (db_mtime is None) or (abs(float(db_mtime) - float(info.get("mtime") or 0.0)) > 1.0)
+                # Allow 2 seconds tolerance for mtime
+                need_mtime = (db_mtime is None) or (abs(float(db_mtime) - float(info.get("mtime") or 0.0)) > 2.0)
+                
                 need_hash = False
                 new_hash = ""
+                
                 if db_hash:
-                    new_hash = file_hash(canon)
-                    if new_hash and new_hash != db_hash:
-                        need_hash = True
+                    # 优化: 如果大小和时间戳一致，且未开启深度校验，则跳过哈希计算
+                    if (not need_size) and (not need_mtime) and (not deep_verify):
+                        pass
+                    else:
+                        new_hash = file_hash(canon)
+                        if new_hash and new_hash != db_hash:
+                            need_hash = True
                 else:
                     new_hash = file_hash(canon)
                     if new_hash:
@@ -767,6 +793,26 @@ class SystemCommandsMixin:
             print(Colors.red("找不到数据库路径喵..."))
             return
 
+        self._clean_run_fix(yes, db_path, logger, lib_root, 
+                            duplicates_records, missing_files_records, relink_records, 
+                            meta_mismatches, missing_db_records, 
+                            db_by_file, eng, file_hash, resume_from=resume_from)
+
+
+        print(Colors.cyan("\n开始复检喵..."))
+        try:
+            verify_tokens = [x for x in tokens if x not in {"--fix", "--apply", "--repair"}]
+            verify_tokens.append("--dry-run")
+            verify_arg = " ".join(shlex.quote(x) for x in verify_tokens)
+            self.do_clean(verify_arg, silent=False)
+        except Exception:
+            pass
+
+    def _clean_run_fix(self, yes, db_path, logger, lib_root, 
+                       duplicates_records, missing_files_records, relink_records, 
+                       meta_mismatches, missing_db_records, 
+                       db_by_file, eng, file_hash_func,
+                       resume_from=None):
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = f"{db_path}.bak_{ts}"
         try:
@@ -784,6 +830,12 @@ class SystemCommandsMixin:
         if conn is None:
             print(Colors.red("数据库连接不可用喵..."))
             return
+
+        def under_root(root, p):
+            try:
+                return os.path.commonpath([root, p]) == root
+            except Exception:
+                return False
 
         def infer_from_library_path(ap):
             author = "佚名"
@@ -808,6 +860,16 @@ class SystemCommandsMixin:
         last_fp = ""
         try:
             conn.execute("BEGIN")
+            
+            # 使用 tqdm 显示修复进度 (如果有)
+            total_ops = (
+                len(duplicates_records) + 
+                len(missing_files_records) + 
+                len(relink_records) + 
+                len(meta_mismatches) + 
+                len(missing_db_records)
+            )
+            pbar = tqdm(total=total_ops, desc="正在修复", unit="op") if tqdm else None
 
             del_dup = 0
             keep_ids = set()
@@ -830,11 +892,13 @@ class SystemCommandsMixin:
                             logger.info("clean_delete_duplicate book_id=%s keep_id=%s", bid, keep)
                         except Exception:
                             pass
+                if pbar: pbar.update(1)
 
             del_orphan = 0
             for item in missing_files_records:
                 bid = int(item["id"])
                 if bid in keep_ids:
+                    if pbar: pbar.update(1)
                     continue
                 last_fp = str(item.get("path") or "")
                 if self.db.delete_book(bid):
@@ -843,6 +907,7 @@ class SystemCommandsMixin:
                         logger.info("clean_delete_orphan book_id=%s", bid)
                     except Exception:
                         pass
+                if pbar: pbar.update(1)
 
             relinked = 0
             for item in relink_records:
@@ -855,6 +920,7 @@ class SystemCommandsMixin:
                         logger.info("clean_relink book_id=%s new_path=%s", bid, newp)
                     except Exception:
                         pass
+                if pbar: pbar.update(1)
 
             updated_meta = 0
             for item in meta_mismatches:
@@ -870,6 +936,7 @@ class SystemCommandsMixin:
                         logger.info("clean_update_meta book_id=%s path=%s", bid, fp)
                     except Exception:
                         pass
+                if pbar: pbar.update(1)
 
             added = 0
             now_s = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -888,6 +955,7 @@ class SystemCommandsMixin:
             for item in missing_db_records:
                 fp = str(item["path"])
                 if fp in reserved:
+                    if pbar: pbar.update(1)
                     continue
                 last_fp = fp
                 meta = eng.parse_metadata_from_filename(fp) or {}
@@ -905,17 +973,27 @@ class SystemCommandsMixin:
                 if not title:
                     title = "未命名"
                 ext2 = os.path.splitext(fp)[1].lower().lstrip(".")
-                fh2 = file_hash(fp)
+                fh2 = file_hash_func(fp)
                 self.db.add_book(title, author, "", 0, series, fp, ext2, file_hash=fh2, import_date=now_s)
                 added += 1
                 try:
                     logger.info("clean_add_missing file=%s title=%s author=%s", fp, title, author)
                 except Exception:
                     pass
+                if pbar: pbar.update(1)
 
+            if pbar: pbar.close()
             conn.commit()
             print(Colors.green(f"\n修复完成喵！删除多余记录: {del_orphan}，合并重复: {del_dup}，纠正路径: {relinked}，补录: {added}，更新元数据: {updated_meta}"))
-
+            
+            # 修复成功后，清理备份文件
+            try:
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                    logger.info("clean_backup_removed path=%s", backup_path)
+            except Exception as e:
+                print(Colors.yellow(f"备份文件清理失败: {e}"))
+                
         except KeyboardInterrupt:
             try:
                 conn.rollback()
@@ -946,15 +1024,6 @@ class SystemCommandsMixin:
                 self.db._suspend_commit = False
             except Exception:
                 pass
-
-        print(Colors.cyan("\n开始复检喵..."))
-        try:
-            verify_tokens = [x for x in tokens if x not in {"--fix", "--apply", "--repair"}]
-            verify_tokens.append("--dry-run")
-            verify_arg = " ".join(shlex.quote(x) for x in verify_tokens)
-            self.do_clean(verify_arg, silent=False)
-        except Exception:
-            pass
 
     def do_clean_legacy(self, arg="", silent=False):
         """清理无效记录: clean [--sync] [--dry-run] [--yes]

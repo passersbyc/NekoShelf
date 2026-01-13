@@ -126,7 +126,55 @@ class DatabaseManager:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_download_records_file_hash ON download_records(file_hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_download_records_book_id ON download_records(book_id)")
 
+        # 创建 subscriptions 表 (追更功能)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE,
+                alias TEXT,
+                last_check TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         self.conn.commit()
+
+    def add_subscription(self, url, alias=None):
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("INSERT INTO subscriptions (url, alias) VALUES (?, ?)", (url, alias))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def is_subscribed(self, url):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM subscriptions WHERE url = ?", (url,))
+        return cursor.fetchone() is not None
+
+    def remove_subscription(self, url):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM subscriptions WHERE url = ?", (url,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_subscriptions(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM subscriptions ORDER BY created_at DESC")
+        return cursor.fetchall()
+
+    def update_subscription_last_check(self, url):
+        cursor = self.conn.cursor()
+        now = datetime.datetime.now()
+        cursor.execute("UPDATE subscriptions SET last_check = ? WHERE url = ?", (now, url))
+        self.conn.commit()
+
+    def update_subscription_alias(self, url, alias):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE subscriptions SET alias = ? WHERE url = ?", (alias, url))
+        self.conn.commit()
+        return cursor.rowcount > 0
 
     def _commit_if_needed(self):
         try:
@@ -151,7 +199,7 @@ class DatabaseManager:
         try:
             cursor = self.conn.cursor()
             cursor.execute('INSERT OR IGNORE INTO authors (name) VALUES (?)', (name,))
-            self.conn.commit()
+            self._commit_if_needed()
         except Exception:
             pass
 
@@ -183,6 +231,39 @@ class DatabaseManager:
         self.update_author_import_date(author, import_date)
         
         return cursor.lastrowid
+
+    def add_download_record(
+        self,
+        platform: str,
+        work_id: str,
+        author: str,
+        title: str,
+        local_path: str,
+        file_hash: str = "",
+        source_url: str = "",
+        book_id: Optional[int] = None
+    ):
+        """兼容性别名：add_download_record -> upsert_download_record"""
+        # 如果调用者没有提供 file_hash，这里尝试计算一下，或者留空
+        if not file_hash and local_path and os.path.exists(local_path):
+             # 避免在这里引入太多依赖，简单处理，或者留空
+             # 真正的 hash 计算通常在 DownloadManager 或 ImportEngine 中
+             pass
+
+        # 构造 download_date
+        download_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        return self.upsert_download_record(
+            platform=platform,
+            work_id=work_id,
+            author=author,
+            title=title,
+            download_date=download_date,
+            file_path=local_path,
+            file_hash=file_hash or "PENDING", # 临时占位，避免插入失败
+            source_url=source_url,
+            book_id=book_id
+        )
 
     def upsert_download_record(
         self,
@@ -468,8 +549,12 @@ class DatabaseManager:
         try:
             cursor.execute("DELETE FROM books")
             cursor.execute("DELETE FROM authors")
+            cursor.execute("DELETE FROM subscriptions")
+            cursor.execute("DELETE FROM download_records")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name='books'")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name='authors'")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name='subscriptions'")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name='download_records'")
             self.conn.commit()
             return True
         except Exception:

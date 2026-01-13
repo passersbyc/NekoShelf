@@ -8,15 +8,17 @@ import hashlib
 import tempfile
 import requests
 import html
+import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple, Optional, Any
 from tqdm import tqdm
 from bs4 import BeautifulSoup
 
 from core.utils import Colors
+from core.database import DatabaseManager
 from .base import DownloadPlugin
 from .utils import sanitize_filename, set_file_time, create_cbz, create_pdf
-from ...config import DOWNLOAD_CONFIG
+from ... import config
 
 class KemonoPlugin(DownloadPlugin):
     """
@@ -24,9 +26,8 @@ class KemonoPlugin(DownloadPlugin):
     Supports: Patreon, Fanbox, Fantia, etc. via Kemono.
     """
     
-    BASE_URL = DOWNLOAD_CONFIG.get("kemono_base_url", "https://kemono.cr")
-    API_BASE = DOWNLOAD_CONFIG.get("kemono_api_base", "https://kemono.cr/api/v1")
-    MAX_WORKERS = DOWNLOAD_CONFIG.get("max_workers", 5)
+    BASE_URL = "https://kemono.cr"
+    API_BASE = "https://kemono.cr/api/v1"
     
     def __init__(self):
         self.session = requests.Session()
@@ -36,16 +37,43 @@ class KemonoPlugin(DownloadPlugin):
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
         
+        self._refresh_config(reload=True)
+
+    def _refresh_config(self, reload: bool = False):
+        cfg = config.get_download_config(reload=reload)
+        self.BASE_URL = str(cfg.get("kemono_base_url", "https://kemono.cr") or "https://kemono.cr")
+        self.API_BASE = str(cfg.get("kemono_api_base", "https://kemono.cr/api/v1") or "https://kemono.cr/api/v1")
+        self.MAX_WORKERS = int(cfg.get("max_workers", 5) or 5)
+        self.TIMEOUT = int(cfg.get("timeout", 10) or 10)
+        self.MAX_RETRIES = int(cfg.get("max_retries", 3) or 3)
+
+        # 更新 Session 的重试策略
+        retries = requests.adapters.Retry(
+            total=self.MAX_RETRIES, 
+            backoff_factor=1, 
+            status_forcelist=[500, 502, 503, 504]
+        )
+        adapter = requests.adapters.HTTPAdapter(max_retries=retries, pool_connections=50, pool_maxsize=50)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
+
         headers = {
-            "User-Agent": DOWNLOAD_CONFIG.get("user_agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+            "User-Agent": cfg.get("user_agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
             "Referer": self.BASE_URL,
-            "Accept": "text/css" 
+            "Accept": "text/css",
         }
-        
-        if cookie := DOWNLOAD_CONFIG.get("kemono_cookie"):
+        cookie = cfg.get("kemono_cookie")
+        if cookie:
             headers["Cookie"] = cookie
-            
+        else:
+            if "Cookie" in self.session.headers:
+                try:
+                    del self.session.headers["Cookie"]
+                except Exception:
+                    pass
+
         self.session.headers.update(headers)
+        return cfg
 
     @property
     def name(self) -> str:
@@ -54,7 +82,18 @@ class KemonoPlugin(DownloadPlugin):
     def can_handle(self, url: str) -> bool:
         return re.search(r"kemono\.(cr|su|party)/(?P<service>\w+)/user/(?P<user_id>\d+)", url) is not None
 
+    def get_artist_name(self, url: str) -> str:
+        user_match = re.search(r"kemono\.(cr|su|party)/(?P<service>\w+)/user/(?P<user_id>\d+)", url)
+        if user_match:
+            service = user_match.group("service")
+            user_id = user_match.group("user_id")
+            return self._get_author_name(service, user_id)
+        return ""
+
     def download(self, url: str, output_dir: str, **kwargs) -> tuple[bool, str, str]:
+        db_instance = kwargs.get("db")
+        self.db_path = db_instance.db_path if db_instance else None
+        
         print(Colors.pink(f"正在解析 Kemono 链接喵: {url}"))
         
         post_match = re.search(r"kemono\.(cr|su|party)/(?P<service>\w+)/user/(?P<user_id>\d+)/post/(?P<post_id>\d+)", url)
@@ -68,6 +107,7 @@ class KemonoPlugin(DownloadPlugin):
             return False, "链接格式不对喵... 需要类似 https://kemono.cr/patreon/user/12345 或 具体帖子链接", None
 
     def _download_single_post_mode(self, match, output_dir, **kwargs) -> tuple[bool, str, str]:
+        cfg = self._refresh_config(reload=True)
         service = match.group("service")
         user_id = match.group("user_id")
         post_id = match.group("post_id")
@@ -75,8 +115,7 @@ class KemonoPlugin(DownloadPlugin):
         author_name = self._get_author_name(service, user_id)
         print(Colors.cyan(f"找到作者: {author_name} (ID: {user_id})"))
         
-        from ...config import LIBRARY_DIR
-        base_dir = output_dir if output_dir else LIBRARY_DIR
+        base_dir = output_dir if output_dir else config.get_paths(reload=False)[0]
         author_dir = os.path.join(base_dir, sanitize_filename(author_name))
         os.makedirs(author_dir, exist_ok=True)
         
@@ -85,7 +124,11 @@ class KemonoPlugin(DownloadPlugin):
         if not post:
              return False, f"无法获取帖子数据 ({post_id})", None
              
-        config_save_content = DOWNLOAD_CONFIG.get("kemono_save_content", False)
+        # Normalize post data
+        if not post.get("service"): post["service"] = service
+        if not post.get("user"): post["user"] = user_id
+             
+        config_save_content = bool(cfg.get("kemono_save_content", False))
         should_save_content = kwargs.get("save_content", False) or config_save_content
         dl_mode = kwargs.get("kemono_dl_mode", "attachment")
         
@@ -103,27 +146,77 @@ class KemonoPlugin(DownloadPlugin):
             return False, "下载失败喵...", author_dir
 
     def _download_user_mode(self, match, output_dir, **kwargs) -> tuple[bool, str, str]:
+        cfg = self._refresh_config(reload=True)
         service = match.group("service")
         user_id = match.group("user_id")
         
         author_name = self._get_author_name(service, user_id)
         print(Colors.cyan(f"找到作者: {author_name} (ID: {user_id})"))
         
-        from ...config import LIBRARY_DIR
-        base_dir = output_dir if output_dir else LIBRARY_DIR
+        base_dir = output_dir if output_dir else config.get_paths(reload=False)[0]
         author_dir = os.path.join(base_dir, sanitize_filename(author_name))
         os.makedirs(author_dir, exist_ok=True)
         
         print(Colors.pink("正在获取帖子列表，可能需要一点时间喵..."))
         posts = self._get_all_posts(service, user_id)
-        print(Colors.green(f"共发现 {len(posts)} 个帖子喵！准备开始搬运..."))
         
+        # 预先过滤已下载的帖子
+        db = kwargs.get("db")
+        local_db = None
+        if not db and self.db_path:
+            try:
+                local_db = DatabaseManager(self.db_path)
+                db = local_db
+            except Exception:
+                pass
+        
+        filtered_posts = []
+        skipped_count = 0
+        
+        if db:
+            print(Colors.pink("正在比对数据库记录喵..."))
+            for post in posts:
+                # Normalize post data in place
+                if not post.get("service"): post["service"] = service
+                if not post.get("user"): post["user"] = user_id
+                
+                p_service = post.get("service") or service
+                p_user = post.get("user") or user_id
+                p_id = post.get("id") or "0"
+                work_sig = f"kemono:{p_service}:{p_user}:{p_id}".strip(":")
+                
+                rec = db.get_download_record("kemono", work_sig)
+                if rec:
+                    skipped_count += 1
+                else:
+                    # tqdm.write(Colors.dim(f"Check miss: {work_sig}"))
+                    filtered_posts.append(post)
+        else:
+            # Still normalize posts even if no db
+            for post in posts:
+                if not post.get("service"): post["service"] = service
+                if not post.get("user"): post["user"] = user_id
+            filtered_posts = posts
+            
+        if local_db:
+            try:
+                local_db.conn.close()
+            except Exception:
+                pass
+
+        if skipped_count > 0:
+            print(Colors.green(f"共发现 {len(posts)} 个帖子，其中 {skipped_count} 个已存在，准备搬运 {len(filtered_posts)} 个新帖子喵！"))
+        else:
+            print(Colors.green(f"共发现 {len(posts)} 个帖子喵！准备开始搬运..."))
+        
+        posts = filtered_posts
+
         if not posts:
-            return True, "没有找到任何帖子喵...", author_dir
+            return True, f"没有找到新帖子喵 (跳过 {skipped_count} 个)...", author_dir
 
         results = {'success': 0, 'fail': 0}
         
-        config_save_content = DOWNLOAD_CONFIG.get("kemono_save_content", False)
+        config_save_content = bool(cfg.get("kemono_save_content", False))
         should_save_content = kwargs.get("save_content", False) or config_save_content
         dl_mode = kwargs.get("kemono_dl_mode", "attachment")
         
@@ -141,7 +234,7 @@ class KemonoPlugin(DownloadPlugin):
 
     def _process_batch(self, items: List[Any], save_dir: str, desc: str, func, stats: Dict):
         tqdm.write(Colors.yellow(f"--- 开始处理 {len(items)} 个 {desc} ---"))
-        with tqdm(total=len(items), unit="work", desc=f"Processing {desc}") as pbar:
+        with tqdm(total=len(items), unit="work", desc=f"Processing {desc}", leave=False) as pbar:
             with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
                 futures = {executor.submit(func, item, save_dir): item for item in items}
                 
@@ -158,19 +251,43 @@ class KemonoPlugin(DownloadPlugin):
                         pbar.update(1)
 
     def _download_post_safe(self, post: Dict, save_dir: str, author_name: str, save_content: bool = False, dl_mode: str = "attachment") -> bool:
+        db = None
         try:
-            return self._download_post(post, save_dir, author_name, save_content, dl_mode)
+            if self.db_path:
+                try:
+                    db = DatabaseManager(self.db_path)
+                except Exception as e:
+                    tqdm.write(Colors.red(f"DB连接失败: {e}"))
+                    pass
+            
+            return self._download_post(post, save_dir, author_name, save_content, dl_mode, db=db)
         except Exception as e:
             tqdm.write(Colors.red(f"帖子处理失败 ({post.get('id')}): {e}"))
             return False
+        finally:
+            if db:
+                try:
+                    db.conn.close()
+                except Exception:
+                    pass
 
-    def _download_post(self, post: Dict, save_dir: str, author_name: str, save_content: bool = False, dl_mode: str = "attachment") -> bool:
+    def _download_post(self, post: Dict, save_dir: str, author_name: str, save_content: bool = False, dl_mode: str = "attachment", db=None) -> bool:
         post_id = post.get("id") or "0"
         title = post.get("title", "Untitled") or "Untitled"
 
         service = post.get("service") or ""
         user_id = post.get("user") or ""
+        post_id = post.get("id") or "0"
         work_sig = f"kemono:{service}:{user_id}:{post_id}".strip(":")
+        
+        # 1. 检查下载记录 (Download Record)
+        if db:
+            rec = db.get_download_record("kemono", work_sig)
+            if rec:
+                # tqdm.write(Colors.dim(f"发现下载记录，已跳过喵 ({work_sig})"))
+                return True
+
+        title = post.get("title", "Untitled") or "Untitled"
         safe_title = sanitize_filename(f"{author_name} - {title} ({work_sig})")
         
         content = post.get("content", "")
@@ -181,14 +298,14 @@ class KemonoPlugin(DownloadPlugin):
         if file_info: targets.append(file_info)
         if attachments: targets.extend(attachments)
         
-        tqdm.write(Colors.blue(f"初始附件数: {len(targets)}"))
+        # tqdm.write(Colors.blue(f"初始附件数: {len(targets)}"))
         
         if content:
-            tqdm.write(Colors.blue(f"正在解析正文内容 (长度: {len(content)})..."))
+            # tqdm.write(Colors.blue(f"正在解析正文内容 (长度: {len(content)})..."))
             try:
                 soup = BeautifulSoup(content, 'html.parser')
                 imgs = soup.find_all('img')
-                tqdm.write(Colors.blue(f"正文中发现 {len(imgs)} 个 img 标签"))
+                # tqdm.write(Colors.blue(f"正文中发现 {len(imgs)} 个 img 标签"))
                 
                 for img in imgs:
                     src = img.get('src')
@@ -216,7 +333,7 @@ class KemonoPlugin(DownloadPlugin):
 
         if dl_mode == "image":
             if has_attachments:
-                return self._process_attachments(post, targets, save_dir, safe_title, author_name, dl_mode="image")
+                return self._process_attachments(post, targets, save_dir, safe_title, author_name, dl_mode="image", db=db)
             return True
 
         if content and save_content:
@@ -224,12 +341,13 @@ class KemonoPlugin(DownloadPlugin):
             self._save_novel(post, save_dir, novel_title, author_name)
         
         if has_attachments:
-            return self._process_attachments(post, targets, save_dir, safe_title, author_name, dl_mode="attachment")
+            return self._process_attachments(post, targets, save_dir, safe_title, author_name, dl_mode="attachment", db=db)
             
         return True
 
-    def _process_attachments(self, post: Dict, targets: List[Dict], save_dir: str, safe_title: str, author_name: str, dl_mode: str = "attachment") -> bool:
-        fmt = DOWNLOAD_CONFIG.get("kemono_format", "pdf").lower() 
+    def _process_attachments(self, post: Dict, targets: List[Dict], save_dir: str, safe_title: str, author_name: str, dl_mode: str = "attachment", db=None) -> bool:
+        cfg = config.get_download_config(reload=False)
+        fmt = str(cfg.get("kemono_format", "pdf") or "pdf").lower()
         if fmt not in ["cbz", "pdf"]: fmt = "pdf"
         output_ext = f".{fmt}"
         output_path = os.path.join(save_dir, f"{safe_title}{output_ext}")
@@ -237,12 +355,34 @@ class KemonoPlugin(DownloadPlugin):
         packed_exists = os.path.exists(output_path) and os.path.getsize(output_path) > 0
         
         if not packed_exists:
-            from ...config import LIBRARY_DIR
-            lib_author_dir = os.path.join(LIBRARY_DIR, sanitize_filename(author_name))
+            lib_author_dir = os.path.join(config.get_paths(reload=False)[0], sanitize_filename(author_name))
             lib_output_path = os.path.join(lib_author_dir, f"{safe_title}{output_ext}")
             if os.path.exists(lib_output_path) and os.path.getsize(lib_output_path) > 0:
-                tqdm.write(Colors.yellow(f"书库中已存在: {safe_title}{output_ext}，跳过下载喵~"))
+                # tqdm.write(Colors.yellow(f"书库中已存在: {safe_title}{output_ext}，跳过下载喵~"))
                 packed_exists = True
+                
+                # 补录下载记录
+                if db:
+                    try:
+                        p_service = post.get("service") or ""
+                        p_user = post.get("user") or ""
+                        p_id = post.get("id") or "0"
+                        work_id = f"kemono:{p_service}:{p_user}:{p_id}".strip(":")
+
+                        db.upsert_download_record(
+                            platform="kemono",
+                            work_id=work_id,
+                            author=author_name,
+                            title=post.get('title', 'Untitled'),
+                            download_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            file_path=lib_output_path,
+                            file_hash="EXISTING_FILE_SKIPPED",
+                            source_url=f"{self.BASE_URL}/{p_service}/user/{p_user}/post/{p_id}"
+                        )
+                        db.conn.commit()
+                    except Exception as e:
+                        tqdm.write(Colors.red(f"补录下载记录失败: {e}"))
+                        pass
 
         files_to_download = []
         
@@ -282,19 +422,21 @@ class KemonoPlugin(DownloadPlugin):
                  tqdm.write(Colors.yellow(f"警告: 在 Image 模式下未找到任何图片文件喵 (共扫描 {len(targets)} 个目标)~"))
             return True
 
-        tqdm.write(Colors.blue(f"准备下载 {len(files_to_download)} 个文件喵..."))
+        # tqdm.write(Colors.blue(f"准备下载 {len(files_to_download)} 个文件喵..."))
+        
+        results = []
 
         project_temp = os.path.join(os.getcwd(), "temp_downloads")
         os.makedirs(project_temp, exist_ok=True)
         
         with tempfile.TemporaryDirectory(prefix=f"kemono_{post.get('id')}_", dir=project_temp) as temp_dir:
             downloaded_files = self._download_images(files_to_download, temp_dir)
-            tqdm.write(Colors.blue(f"实际下载成功 {len(downloaded_files)} / {len(files_to_download)} 个文件喵"))
+            # tqdm.write(Colors.blue(f"实际下载成功 {len(downloaded_files)} / {len(files_to_download)} 个文件喵"))
             
             self._extract_zips(temp_dir)
             
             final_images = self._scan_images(temp_dir)
-            tqdm.write(Colors.blue(f"扫描到有效图片 {len(final_images)} 张喵"))
+            # tqdm.write(Colors.blue(f"扫描到有效图片 {len(final_images)} 张喵"))
             
             if final_images and not packed_exists:
                 if fmt == "cbz":
@@ -319,6 +461,30 @@ class KemonoPlugin(DownloadPlugin):
                     )
             
             self._move_other_files(temp_dir, final_images, save_dir, safe_title)
+            
+            # 记录下载成功
+            if db:
+                try:
+                    p_service = post.get("service") or ""
+                    p_user = post.get("user") or ""
+                    p_id = post.get("id") or "0"
+                    
+                    work_id = f"kemono:{p_service}:{p_user}:{p_id}".strip(":")
+                    
+                    db.upsert_download_record(
+                        platform="kemono",
+                        work_id=work_id,
+                        author=author_name,
+                        title=post.get('title', 'Untitled'),
+                        download_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        file_path=output_path if final_images else save_dir,
+                        file_hash="DOWNLOADED_NEW",
+                        source_url=f"{self.BASE_URL}/{p_service}/user/{p_user}/post/{p_id}"
+                    )
+                    db.conn.commit()
+                except Exception as e:
+                    tqdm.write(Colors.red(f"保存下载记录失败: {e}"))
+                    pass
                 
         return True
 
@@ -480,14 +646,13 @@ class KemonoPlugin(DownloadPlugin):
         except Exception:
             existing = 0
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        for attempt in range(self.MAX_RETRIES):
             try:
                 headers = {}
                 if existing > 0:
                     headers["Range"] = f"bytes={existing}-"
 
-                res = self.session.get(url, stream=True, timeout=15, headers=headers or None)
+                res = self.session.get(url, stream=True, timeout=self.TIMEOUT, headers=headers or None)
                 if existing > 0 and res.status_code in (416,):
                     return
 
@@ -500,7 +665,7 @@ class KemonoPlugin(DownloadPlugin):
                         pass
                     existing = 0
                     headers = {}
-                    res = self.session.get(url, stream=True, timeout=15)
+                    res = self.session.get(url, stream=True, timeout=self.TIMEOUT)
                     res.raise_for_status()
                 
                 chunk_size = 1024 * 1024
@@ -511,16 +676,16 @@ class KemonoPlugin(DownloadPlugin):
                             f.write(chunk)
                 return
             except Exception as e:
-                if attempt == max_retries - 1:
+                if attempt == self.MAX_RETRIES - 1:
                     if os.path.exists(path):
                         os.remove(path)
-                    raise Exception(f"Failed after {max_retries} attempts: {e}")
+                    raise Exception(f"Failed after {self.MAX_RETRIES} attempts: {e}")
                 time.sleep(1)
 
     def _get_author_name(self, service: str, user_id: str) -> str:
         try:
             profile_url = f"{self.API_BASE}/{service}/user/{user_id}/profile"
-            res = self.session.get(profile_url, timeout=10)
+            res = self.session.get(profile_url, timeout=self.TIMEOUT)
             if res.status_code == 200:
                 data = res.json()
                 if name := data.get("name"):
@@ -530,7 +695,7 @@ class KemonoPlugin(DownloadPlugin):
             
         try:
             url = f"{self.BASE_URL}/{service}/user/{user_id}"
-            res = self.session.get(url, timeout=10)
+            res = self.session.get(url, timeout=self.TIMEOUT)
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, 'html.parser')
                 meta = soup.find('meta', attrs={'name': 'artist_name'})
@@ -548,7 +713,7 @@ class KemonoPlugin(DownloadPlugin):
     def _get_single_post(self, service: str, user_id: str, post_id: str) -> Optional[Dict]:
         url = f"{self.API_BASE}/{service}/user/{user_id}/post/{post_id}"
         try:
-            res = self.session.get(url, timeout=15)
+            res = self.session.get(url, timeout=self.TIMEOUT)
             if res.status_code == 200:
                 data = res.json()
                 
@@ -571,15 +736,16 @@ class KemonoPlugin(DownloadPlugin):
         while True:
             url = f"{self.API_BASE}/{service}/user/{user_id}/posts?o={offset}"
             try:
-                res = self.session.get(url, timeout=15)
+                res = self.session.get(url, timeout=self.TIMEOUT)
                 if res.status_code != 200:
                     if res.status_code == 400 and offset > 0:
-                        tqdm.write(Colors.yellow(f"API 返回 400 (Offset: {offset})，推测已到达列表末尾，停止翻页喵~"))
+                        # Kemono API returns 400 when offset is out of bounds (end of list)
+                        # This is expected behavior, so we just stop pagination.
                         break
 
-                    if retry_count < 3:
+                    if retry_count < self.MAX_RETRIES:
                         retry_count += 1
-                        print(Colors.yellow(f"API 请求失败 ({res.status_code})，正在重试 ({retry_count}/3)..."))
+                        print(Colors.yellow(f"API 请求失败 ({res.status_code})，正在重试 ({retry_count}/{self.MAX_RETRIES})..."))
                         time.sleep(2)
                         continue
                     else:
@@ -598,7 +764,7 @@ class KemonoPlugin(DownloadPlugin):
                 
             except Exception as e:
                 print(Colors.red(f"获取帖子列表出错喵: {e}"))
-                if retry_count < 3:
+                if retry_count < self.MAX_RETRIES:
                     retry_count += 1
                     time.sleep(2)
                     continue
