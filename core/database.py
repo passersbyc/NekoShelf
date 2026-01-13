@@ -170,6 +170,7 @@ class DatabaseManager:
         ''')
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_resources_post_id ON resources(post_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_resources_file_hash ON resources(file_hash)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_resources_post_file ON resources(post_id, file_path)")
 
         self.conn.commit()
 
@@ -637,7 +638,7 @@ class DatabaseManager:
             
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT INTO resources (post_id, file_path, file_url, file_hash, file_size)
+            INSERT OR REPLACE INTO resources (post_id, file_path, file_url, file_hash, file_size)
             VALUES (?, ?, ?, ?, ?)
         ''', (post_id, file_path, file_url, file_hash, file_size))
         self._commit_if_needed()

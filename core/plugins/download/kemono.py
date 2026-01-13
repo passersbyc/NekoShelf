@@ -375,7 +375,7 @@ class KemonoPlugin(DownloadPlugin):
                             work_id=work_id,
                             author=author_name,
                             title=post.get('title', 'Untitled'),
-                            content=BeautifulSoup(post.get('content', ''), 'html.parser').get_text(),
+                            content=BeautifulSoup(post.get('content') or '', 'html.parser').get_text(),
                             tags=",".join(post.get("tags", []) or []),
                             published_at=post.get("published")
                         )
@@ -498,7 +498,7 @@ class KemonoPlugin(DownloadPlugin):
                         work_id=work_id,
                         author=author_name,
                         title=post.get('title', 'Untitled'),
-                        content=BeautifulSoup(post.get('content', ''), 'html.parser').get_text(),
+                        content=BeautifulSoup(post.get('content') or '', 'html.parser').get_text(),
                         tags=",".join(post.get("tags", []) or []),
                         published_at=post.get("published")
                     )
