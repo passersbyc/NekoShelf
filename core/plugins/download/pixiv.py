@@ -516,18 +516,7 @@ class PixivPlugin(DownloadPlugin):
         return works
 
     def _download_novel(self, nid: str, save_dir: str, db=None) -> bool:
-        # Check if file already exists by ID to avoid API call
-        if os.path.exists(save_dir):
-            target_pattern = f"(pixiv:novel:{nid})"
-            # 1. 检查本地文件系统
-            for fname in os.listdir(save_dir):
-                if target_pattern in fname and fname.endswith(".txt"):
-                    fpath = os.path.join(save_dir, fname)
-                    if os.path.getsize(fpath) > 0:
-                        # tqdm.write(Colors.green(f"已存在跳过: {fname}")) # 减少刷屏
-                        return True
-                        
-        # 2. 检查数据库记录 (防止搬运后再次下载)
+        # 1. 检查数据库记录 (防止搬运后再次下载)
         if db:
             record = db.get_download_record("pixiv", f"novel:{nid}")
             if record:
@@ -536,6 +525,27 @@ class PixivPlugin(DownloadPlugin):
                 # 这里为了性能，先简单判断：有记录就跳过
                 return True
 
+        # 2. Check if file already exists by ID to avoid API call
+        if os.path.exists(save_dir):
+            target_pattern = f"(pixiv:novel:{nid})"
+            # 1. 检查本地文件系统
+            for fname in os.listdir(save_dir):
+                if target_pattern in fname and fname.endswith(".txt"):
+                    fpath = os.path.join(save_dir, fname)
+                    if os.path.getsize(fpath) > 0:
+                        # tqdm.write(Colors.green(f"已存在跳过: {fname}")) # 减少刷屏
+                        
+                        # 补录下载记录
+                        if db:
+                            db.add_download_record(
+                                platform="pixiv",
+                                work_id=f"novel:{nid}",
+                                title=fname.split(" (")[0], # 简单提取标题
+                                author="Unknown", # 无法获取作者，暂时设为 Unknown
+                                local_path=fpath
+                            )
+                        return True
+                        
         data = self._request(f"{self.BASE_URL}/ajax/novel/{nid}")
         if not data or data.get('error'): return False
         
@@ -579,20 +589,30 @@ class PixivPlugin(DownloadPlugin):
     def _download_illust(self, iid: str, save_dir: str, temp_root: Optional[str] = None, db=None) -> bool:
         cfg = config.get_download_config(reload=False)
         
-        # 检查本地文件是否存在
-        # 这里只是粗略检查，因为不知道具体的格式
-        if os.path.exists(save_dir):
-             target_pattern = f"(pixiv:illust:{iid})"
-             for fname in os.listdir(save_dir):
-                 if target_pattern in fname and os.path.getsize(os.path.join(save_dir, fname)) > 0:
-                     return True
-        
-        # 检查数据库记录
+        # 1. 检查数据库记录
         if db:
             record = db.get_download_record("pixiv", f"illust:{iid}")
             if record:
                 return True
 
+        # 2. 检查本地文件是否存在
+        # 这里只是粗略检查，因为不知道具体的格式
+        if os.path.exists(save_dir):
+             target_pattern = f"(pixiv:illust:{iid})"
+             for fname in os.listdir(save_dir):
+                 if target_pattern in fname and os.path.getsize(os.path.join(save_dir, fname)) > 0:
+                     
+                     # 补录下载记录
+                     if db:
+                         db.add_download_record(
+                             platform="pixiv",
+                             work_id=f"illust:{iid}",
+                             title=fname.split(" (")[0], # 简单提取标题
+                             author="Unknown", 
+                             local_path=os.path.join(save_dir, fname)
+                         )
+                     return True
+        
         data = self._request(f"{self.BASE_URL}/ajax/illust/{iid}/pages")
         if not data: return False
         pages = data.get('body', [])
