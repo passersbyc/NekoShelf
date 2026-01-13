@@ -40,6 +40,7 @@ library.db-wal
 
 # Project Specific
 library/
+tests/
 temp/
 tmp/
 
