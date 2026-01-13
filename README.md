@@ -14,14 +14,26 @@
 请查看 [使用指南](docs/usage.md) 获取详细说明。
 
 ```bash
-# 启动
-python3 main.py
+# 一键部署 + 启动 (Windows/macOS/Linux)
+python3 bootstrap.py
+
+# 只安装不启动
+python3 bootstrap.py --install-only
 
 # 在 CLI 中输入 help 查看帮助
 (萌萌) > help
 ```
 
+### 环境变量配置
+
+```bash
+# Pixiv
+export NEKOSHELF_PIXIV_COOKIE="..."
+
+# Kemono
+export NEKOSHELF_KEMONO_COOKIE="..."
+```
+
 ## 🛠 开发
 - 核心代码位于 `core/`
 - 插件系统位于 `core/plugins/`
-- 测试用例位于 `tests/`
