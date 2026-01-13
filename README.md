@@ -11,8 +11,6 @@
 - **CLI 交互**: 友好的命令行界面，支持自动补全和彩色输出
 
 ## 🚀 快速开始
-请查看 [使用指南](docs/usage.md) 获取详细说明。
-
 ```bash
 # 一键部署 + 启动 (Windows/macOS/Linux)
 python3 bootstrap.py
