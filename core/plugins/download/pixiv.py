@@ -575,14 +575,36 @@ class PixivPlugin(DownloadPlugin):
         
         # 下载完成后，记录到数据库
         if db:
-            # 假设 title 就是标题
-            db.add_download_record(
-                platform="pixiv",
-                work_id=f"novel:{nid}",
-                title=title,
-                author=author_name,
-                local_path=file_path
-            )
+            try:
+                # 1. 插入到新的 posts 表
+                post_pk = db.upsert_post(
+                    platform="pixiv",
+                    work_id=f"novel:{nid}",
+                    author=author_name,
+                    title=title,
+                    content=body.get('description', ''),
+                    tags=",".join(tags),
+                    published_at=body.get('createDate') or body.get('uploadDate')
+                )
+                
+                # 2. 插入资源
+                if post_pk:
+                    db.add_resource(
+                        post_id=post_pk,
+                        file_path=file_path,
+                        file_size=os.path.getsize(file_path)
+                    )
+
+                # 3. 旧表记录
+                db.add_download_record(
+                    platform="pixiv",
+                    work_id=f"novel:{nid}",
+                    title=title,
+                    author=author_name,
+                    local_path=file_path
+                )
+            except Exception:
+                pass
 
         return True
 
@@ -691,13 +713,38 @@ class PixivPlugin(DownloadPlugin):
 
         # 下载完成后，记录到数据库
         if success and db:
-            db.add_download_record(
-                platform="pixiv",
-                work_id=f"illust:{iid}",
-                title=title,
-                author=author_name,
-                local_path=output_path
-            )
+            try:
+                # 1. 插入到新的 posts 表
+                tags_list = [t.get('tag') for t in (meta_body.get('tags') or {}).get('tags', []) if t.get('tag')]
+                post_pk = db.upsert_post(
+                    platform="pixiv",
+                    work_id=f"illust:{iid}",
+                    author=author_name,
+                    title=title,
+                    content=meta_body.get('description', ''),
+                    tags=",".join(tags_list),
+                    published_at=meta_body.get('createDate') or meta_body.get('uploadDate')
+                )
+                
+                # 2. 插入资源
+                if post_pk:
+                    db.add_resource(
+                        post_id=post_pk,
+                        file_path=output_path,
+                        file_url=f"{self.BASE_URL}/artworks/{iid}",
+                        file_size=os.path.getsize(output_path)
+                    )
+
+                # 3. 旧表记录
+                db.add_download_record(
+                    platform="pixiv",
+                    work_id=f"illust:{iid}",
+                    title=title,
+                    author=author_name,
+                    local_path=output_path
+                )
+            except Exception:
+                pass
 
         return success
 

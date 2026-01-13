@@ -31,6 +31,11 @@ logs/
 *.log
 
 # Database
+*.db
+*.sqlite3
+*.log
+
+# Database
 library.db
 library.db-journal
 library.db-wal

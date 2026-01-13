@@ -137,6 +137,40 @@ class DatabaseManager:
             )
         ''')
 
+        # 创建 posts 表 (存储作品元数据)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                work_id TEXT NOT NULL,
+                author TEXT NOT NULL,
+                title TEXT,
+                content TEXT,
+                tags TEXT,
+                published_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(platform, work_id)
+            )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_posts_platform_work ON posts(platform, work_id)")
+
+        # 创建 resources 表 (存储作品包含的文件资源)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS resources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER NOT NULL,
+                file_url TEXT,
+                file_path TEXT,
+                file_hash TEXT,
+                file_size INTEGER,
+                downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(post_id) REFERENCES posts(id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_resources_post_id ON resources(post_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_resources_file_hash ON resources(file_hash)")
+
         self.conn.commit()
 
     def add_subscription(self, url, alias=None):
@@ -551,15 +585,73 @@ class DatabaseManager:
             cursor.execute("DELETE FROM authors")
             cursor.execute("DELETE FROM subscriptions")
             cursor.execute("DELETE FROM download_records")
+            cursor.execute("DELETE FROM posts")
+            cursor.execute("DELETE FROM resources")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name='books'")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name='authors'")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name='subscriptions'")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name='download_records'")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name='posts'")
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name='resources'")
             self.conn.commit()
             return True
         except Exception:
             self.conn.rollback()
             return False
+
+    def upsert_post(self, platform, work_id, author, title=None, content=None, tags=None, published_at=None):
+        platform = "" if platform is None else str(platform).strip().lower()
+        work_id = "" if work_id is None else str(work_id).strip()
+        
+        if not platform or not work_id:
+            return None
+            
+        cursor = self.conn.cursor()
+        
+        # 检查是否存在
+        cursor.execute('SELECT id FROM posts WHERE platform = ? AND work_id = ?', (platform, work_id))
+        row = cursor.fetchone()
+        
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        if row:
+            post_id = row['id']
+            cursor.execute('''
+                UPDATE posts 
+                SET author = ?, title = ?, content = ?, tags = ?, published_at = ?, updated_at = ?
+                WHERE id = ?
+            ''', (author, title, content, tags, published_at, now, post_id))
+        else:
+            cursor.execute('''
+                INSERT INTO posts (platform, work_id, author, title, content, tags, published_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (platform, work_id, author, title, content, tags, published_at, now, now))
+            post_id = cursor.lastrowid
+            
+        self._commit_if_needed()
+        return post_id
+
+    def add_resource(self, post_id, file_path, file_url=None, file_hash=None, file_size=None):
+        if not post_id or not file_path:
+            return False
+            
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO resources (post_id, file_path, file_url, file_hash, file_size)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (post_id, file_path, file_url, file_hash, file_size))
+        self._commit_if_needed()
+        return True
+
+    def get_post(self, platform, work_id):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM posts WHERE platform = ? AND work_id = ?', (platform, work_id))
+        return cursor.fetchone()
+
+    def get_post_resources(self, post_id):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM resources WHERE post_id = ?', (post_id,))
+        return cursor.fetchall()
 
     def update_book(self, book_id, **kwargs):
         if not kwargs:

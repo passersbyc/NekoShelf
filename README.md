@@ -26,6 +26,18 @@ python3 bootstrap.py --install-only
 (萌萌) > help
 ```
 
+## 🛠️ 常用命令
+
+| 命令 | 说明 | 示例 |
+| --- | --- | --- |
+| `download` | 下载单本书籍或作者全部作品 | `download https://kemono.su/...` |
+| `pull` | 检查并下载已关注作者的新作品 (多线程并行) | `pull` |
+| `subscribe` | 关注作者 (自动添加到 pull 列表) | `subscribe https://pixiv.net/...` |
+| `import` | 导入本地文件到书库 | `import /path/to/files` |
+| `list` | 列出书库中的书籍 | `list --limit 20` |
+| `clean` | 清理失效的数据库记录 | `clean --fix` |
+| `serve` | 启动 Web 阅读服务 | `serve --port 8000` |
+
 ## ⚙️ 配置
 
 配置文件： [core/config.py](core/config.py)

@@ -251,24 +251,22 @@ class DownloadCommandsMixin:
             print(Colors.yellow("没有关注的作者喵~"))
             return
             
-        print(Colors.cyan(f"开始检查 {len(subs)} 位作者的更新喵 (并行处理)...\n"))
+        print(Colors.cyan(f"开始检查 {len(subs)} 位作者的更新喵 (顺序检查，并行下载)...\n"))
         
         from core.database import DatabaseManager
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         
         count = 0
         total_downloaded = 0
         
-        def process_sub(sub):
+        for sub in subs:
             url = sub['url']
-            alias = sub['alias'] or url
+            name = sub['alias'] or url
             
-            # 使用独立的 DB 连接，防止多线程冲突
+            # print(Colors.dim(f"正在检查: {name}..."))
+            
             try:
-                db_local = DatabaseManager(self.db.db_path)
-                svc = DownloadImportService(db_local, self.fm)
-                
                 # 默认使用 skip 模式，避免重复询问
+                svc = DownloadImportService(self.db, self.fm)
                 out = svc.download_and_import(
                     url,
                     kemono_dl_mode="attachment",
@@ -276,41 +274,24 @@ class DownloadCommandsMixin:
                     quiet=True
                 )
                 
-                # 更新检查时间 (使用 local db)
-                db_local.update_subscription_last_check(url)
+                # 更新检查时间
+                self.db.update_subscription_last_check(url)
                 
-                return sub, out, None
-            except Exception as e:
-                return sub, None, str(e)
-
-        # 限制并发数为 3，避免对服务器造成过大压力
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(process_sub, sub): sub for sub in subs}
-            
-            for future in as_completed(futures):
-                sub = futures[future]
-                name = sub['alias'] or sub['url']
-                
-                try:
-                    _, out, err = future.result()
-                    
-                    if err:
-                        print(Colors.red(f"❌ {name}: 更新失败 ({err})"))
-                    elif out:
-                        # 优先使用 'imported' 作为下载数量
-                        dl = out.get('imported', 0)
-                        if dl > 0:
-                            print(Colors.green(f"✅ {name}: 更新了 {dl} 个文件喵！"))
-                            count += 1
-                            total_downloaded += dl
-                        elif out.get('skipped', 0) > 0:
-                             print(Colors.dim(f"💤 {name}: 暂无新内容 (跳过 {out.get('skipped')} 个)"))
-                        else:
-                            print(Colors.dim(f"💤 {name}: 暂无新内容"))
+                if out:
+                    # 优先使用 'imported' 作为下载数量
+                    dl = out.get('imported', 0)
+                    if dl > 0:
+                        print(Colors.green(f"✅ {name}: 更新了 {dl} 个文件喵！"))
+                        count += 1
+                        total_downloaded += dl
+                    elif out.get('skipped', 0) > 0:
+                         print(Colors.dim(f"💤 {name}: 暂无新内容 (跳过 {out.get('skipped')} 个)"))
                     else:
                         print(Colors.dim(f"💤 {name}: 暂无新内容"))
-                        
-                except Exception as e:
-                    print(Colors.red(f"❌ {name}: 系统错误 ({e})"))
+                else:
+                    print(Colors.dim(f"💤 {name}: 暂无新内容"))
+            
+            except Exception as e:
+                print(Colors.red(f"❌ {name}: 更新失败 ({e})"))
 
         print(Colors.green(f"\n检查完毕！有更新的作者: {count} 位，共下载 {total_downloaded} 个文件喵。"))

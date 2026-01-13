@@ -138,6 +138,13 @@ class DownloadImportService:
         except Exception:
             pass
 
+        # 尝试从 message 中提取跳过数量 (针对 Kemono/Pixiv 插件在下载阶段的跳过)
+        import re
+        if msg:
+            m = re.search(r"跳过 (\d+) 个", msg)
+            if m:
+                skipped += int(m.group(1))
+
         if created_temp:
             try:
                 for root, dirs, files in os.walk(download_dir, topdown=False):

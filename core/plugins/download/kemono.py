@@ -369,6 +369,27 @@ class KemonoPlugin(DownloadPlugin):
                         p_id = post.get("id") or "0"
                         work_id = f"kemono:{p_service}:{p_user}:{p_id}".strip(":")
 
+                        # 1. 插入到新的 posts 表
+                        post_pk = db.upsert_post(
+                            platform="kemono",
+                            work_id=work_id,
+                            author=author_name,
+                            title=post.get('title', 'Untitled'),
+                            content=BeautifulSoup(post.get('content', ''), 'html.parser').get_text(),
+                            tags=",".join(post.get("tags", []) or []),
+                            published_at=post.get("published")
+                        )
+
+                        # 2. 补录资源 (如果文件存在)
+                        if post_pk and os.path.exists(lib_output_path):
+                            db.add_resource(
+                                post_id=post_pk,
+                                file_path=lib_output_path,
+                                file_url=f"{self.BASE_URL}/{p_service}/user/{p_user}/post/{p_id}",
+                                file_size=os.path.getsize(lib_output_path)
+                            )
+
+                        # 3. 旧表记录
                         db.upsert_download_record(
                             platform="kemono",
                             work_id=work_id,
@@ -460,7 +481,7 @@ class KemonoPlugin(DownloadPlugin):
                         published_time=post.get("published")
                     )
             
-            self._move_other_files(temp_dir, final_images, save_dir, safe_title)
+            moved_files = self._move_other_files(temp_dir, final_images, save_dir, safe_title)
             
             # 记录下载成功
             if db:
@@ -471,6 +492,38 @@ class KemonoPlugin(DownloadPlugin):
                     
                     work_id = f"kemono:{p_service}:{p_user}:{p_id}".strip(":")
                     
+                    # 1. 插入到新的 posts 表 (补全元数据)
+                    post_pk = db.upsert_post(
+                        platform="kemono",
+                        work_id=work_id,
+                        author=author_name,
+                        title=post.get('title', 'Untitled'),
+                        content=BeautifulSoup(post.get('content', ''), 'html.parser').get_text(),
+                        tags=",".join(post.get("tags", []) or []),
+                        published_at=post.get("published")
+                    )
+
+                    # 2. 插入资源到 resources 表
+                    if post_pk:
+                        # 记录主文件 (CBZ/PDF)
+                        if final_images and (not packed_exists or os.path.exists(output_path)):
+                             db.add_resource(
+                                post_id=post_pk,
+                                file_path=output_path,
+                                file_url=f"{self.BASE_URL}/{p_service}/user/{p_user}/post/{p_id}",
+                                file_size=os.path.getsize(output_path) if os.path.exists(output_path) else 0
+                             )
+                        
+                        # 记录其他移动的文件
+                        for mf in moved_files:
+                            if os.path.exists(mf):
+                                db.add_resource(
+                                    post_id=post_pk,
+                                    file_path=mf,
+                                    file_size=os.path.getsize(mf)
+                                )
+
+                    # 3. 保持旧的 download_records 以兼容去重逻辑
                     db.upsert_download_record(
                         platform="kemono",
                         work_id=work_id,
@@ -506,56 +559,59 @@ class KemonoPlugin(DownloadPlugin):
                     return True
         return True
 
-    def _move_other_files(self, temp_dir: str, packaged_images: List[str], save_dir: str, base_name: str = ""):
-        all_files = []
-        for root, _, filenames in os.walk(temp_dir):
-            for f in filenames:
-                all_files.append(os.path.join(root, f))
+    def _move_other_files(self, src_dir: str, images: List[str], save_dir: str, base_name: str) -> List[str]:
+        moved_files = []
+        image_set = set(images)
         
-        non_image_files = [f for f in all_files if f not in packaged_images]
-        
-        for src_path in non_image_files:
-            original_name = os.path.basename(src_path)
-            
-            if base_name:
-                if base_name in original_name:
+        for root, dirs, files in os.walk(src_dir):
+            for fname in files:
+                src_path = os.path.join(root, fname)
+                if src_path in image_set: continue
+                
+                # Handle relative path structure if needed, but for now flatten
+                original_name = fname
+                if base_name:
+                    if base_name in original_name:
+                        dst_name = original_name
+                    else:
+                        dst_name = f"{base_name} - {original_name}"
+                else:
                     dst_name = original_name
-                else:
-                    dst_name = f"{base_name} - {original_name}"
-            else:
-                dst_name = original_name
+                    
+                dst_name = sanitize_filename(dst_name)
+                dst_path = os.path.join(save_dir, dst_name)
                 
-            dst_name = sanitize_filename(dst_name)
-            dst_path = os.path.join(save_dir, dst_name)
-            
-            if os.path.exists(dst_path):
-                if self._is_same_file(src_path, dst_path):
-                    try:
-                        os.remove(dst_path)
-                    except: pass
-                else:
-                    base, ext = os.path.splitext(dst_name)
-                    counter = 1
-                    while True:
-                        new_name = f"{base} ({counter}){ext}"
-                        new_path = os.path.join(save_dir, new_name)
-                        
-                        if not os.path.exists(new_path):
-                            dst_path = new_path
-                            break
+                if os.path.exists(dst_path):
+                    if self._is_same_file(src_path, dst_path):
+                        try:
+                            os.remove(dst_path)
+                        except: pass
+                    else:
+                        base, ext = os.path.splitext(dst_name)
+                        counter = 1
+                        while True:
+                            new_name = f"{base} ({counter}){ext}"
+                            new_path = os.path.join(save_dir, new_name)
                             
-                        if self._is_same_file(src_path, new_path):
-                            dst_path = new_path
-                            try: os.remove(dst_path)
-                            except: pass
-                            break
-                            
-                        counter += 1
-                
-            try:
-                shutil.move(src_path, dst_path)
-            except Exception as e:
-                tqdm.write(Colors.red(f"移动文件失败 {dst_name}: {e}"))
+                            if not os.path.exists(new_path):
+                                dst_path = new_path
+                                break
+                                
+                            if self._is_same_file(src_path, new_path):
+                                dst_path = new_path
+                                try: os.remove(dst_path)
+                                except: pass
+                                break
+                                
+                            counter += 1
+                    
+                try:
+                    shutil.move(src_path, dst_path)
+                    moved_files.append(dst_path)
+                except Exception as e:
+                    tqdm.write(Colors.red(f"移动文件失败 {dst_name}: {e}"))
+        
+        return moved_files
 
     def _save_novel(self, post: Dict, save_dir: str, title_safe: str, author_name: str) -> bool:
         filename = f"{title_safe}.txt"
