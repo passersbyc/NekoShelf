@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nekoshelf"
+version = "1.1"
+description = "NekoShelf"
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.28",
+  "tqdm>=4.64",
+  "beautifulsoup4>=4.12",
+  "Pillow>=10.0",
+  "urllib3>=1.26",
+]
+
+[project.scripts]
+nekoshelf = "core.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*"]

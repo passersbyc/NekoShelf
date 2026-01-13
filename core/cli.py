@@ -245,3 +245,10 @@ class MoeCLI(
             return super().postloop()
         finally:
             self._save_history()
+
+
+def main():
+    try:
+        MoeCLI().cmdloop()
+    except KeyboardInterrupt:
+        print(Colors.pink("\n萌萌去休息了喵~ 拜拜！"))
